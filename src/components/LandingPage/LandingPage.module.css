@@ -1,0 +1,138 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100%;
+  padding: var(--spacing-lg) var(--spacing-md);
+  padding-bottom: calc(var(--spacing-lg) + var(--safe-bottom));
+  overflow-y: auto;
+  gap: var(--spacing-lg);
+}
+
+/* ── Hero ─────────────────────────────────────────────── */
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  text-align: center;
+  padding-top: var(--spacing-md);
+}
+
+.icon {
+  width: 72px;
+  height: 72px;
+  color: var(--color-accent);
+}
+
+.icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.title {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin: 0;
+}
+
+.title span {
+  color: var(--color-accent);
+}
+
+.tagline {
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+  max-width: 28ch;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ── Steps ────────────────────────────────────────────── */
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.step {
+  display: flex;
+  gap: var(--spacing-md);
+  align-items: flex-start;
+}
+
+.stepNumber {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background-color: var(--color-accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.stepText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stepText strong {
+  font-size: 0.95rem;
+  color: var(--color-text);
+}
+
+.stepText p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+/* ── Start button ─────────────────────────────────────── */
+.startButton {
+  width: 100%;
+  max-width: 360px;
+  padding: 16px;
+  border-radius: 12px;
+  border: none;
+  background-color: var(--color-accent);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.startButton:active {
+  opacity: 0.85;
+  transform: scale(0.98);
+}
+
+/* ── Version info ─────────────────────────────────────── */
+.versionInfo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  opacity: 0.6;
+  margin-top: auto;
+  padding-top: var(--spacing-sm);
+}
+
+.dot {
+  opacity: 0.4;
+}

@@ -3,18 +3,19 @@ import styles from './App.module.css'
 import { CameraCapture } from './components/CameraCapture'
 import { FrameReview } from './components/FrameReview'
 import { InstallPrompt } from './components/InstallPrompt'
+import { LandingPage } from './components/LandingPage'
 import { ProcessingView } from './components/ProcessingView'
 import { ResultView } from './components/ResultView'
 import { extractFrames } from './lib/frameSelector'
 
-export type AppState = 'capture' | 'review' | 'processing' | 'result'
+export type AppState = 'landing' | 'capture' | 'review' | 'processing' | 'result'
 
 const STATE_ORDER: AppState[] = ['capture', 'review', 'processing', 'result']
 
 const VIDEO_FRAME_TARGET = 12
 
 function App() {
-  const [appState, setAppState] = useState<AppState>('capture')
+  const [appState, setAppState] = useState<AppState>('landing')
   const [capturedFrames, setCapturedFrames] = useState<Blob[]>([])
   const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [isExtracting, setIsExtracting] = useState(false)
@@ -65,6 +66,8 @@ function App() {
 
   const renderView = () => {
     switch (appState) {
+      case 'landing':
+        return <LandingPage onStart={() => setAppState('capture')} />
       case 'capture':
         return <CameraCapture onCapture={handleCapture} />
       case 'review':
@@ -91,7 +94,7 @@ function App() {
             onReset={() => {
               setCapturedFrames([])
               setResultBlob(null)
-              setAppState('capture')
+              setAppState('landing')
             }}
           />
         )
@@ -138,17 +141,19 @@ function App() {
         )}
       </main>
 
-      <footer className={styles.footer}>
-        <div className={styles.stateIndicator} role="status" aria-label={`Current step: ${appState}`}>
-          {STATE_ORDER.map((state) => (
-            <div
-              key={state}
-              className={`${styles.stateDot} ${state === appState ? styles.stateDotActive : ''}`}
-              aria-hidden="true"
-            />
-          ))}
-        </div>
-      </footer>
+      {appState !== 'landing' && (
+        <footer className={styles.footer}>
+          <div className={styles.stateIndicator} role="status" aria-label={`Current step: ${appState}`}>
+            {STATE_ORDER.map((state) => (
+              <div
+                key={state}
+                className={`${styles.stateDot} ${state === appState ? styles.stateDotActive : ''}`}
+                aria-hidden="true"
+              />
+            ))}
+          </div>
+        </footer>
+      )}
     </div>
   )
 }
