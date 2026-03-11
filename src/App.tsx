@@ -30,9 +30,7 @@ function App() {
         setAppState('review')
       } catch (err) {
         console.error('Frame extraction failed:', err)
-        // Fall back to using the raw video blob so the user can retry from review
-        setCapturedFrames(blobs)
-        setAppState('review')
+        setAppState('capture')
       } finally {
         setIsExtracting(false)
       }
