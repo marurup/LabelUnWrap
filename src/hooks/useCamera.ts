@@ -23,6 +23,16 @@ export function useCamera(): UseCameraReturn {
     setError(null)
 
     const constraints: MediaStreamConstraints[] = [
+      {
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          // @ts-expect-error — focusMode is not yet in TypeScript's MediaTrackConstraints but is supported on Android Chrome
+          focusMode: 'continuous',
+        },
+        audio: false,
+      },
       { video: { facingMode: 'environment' }, audio: false },
       { video: true, audio: false },
     ]
@@ -50,6 +60,17 @@ export function useCamera(): UseCameraReturn {
       setError('Unable to access camera. Please ensure a camera is connected and try again.')
       setIsLoading(false)
       return
+    }
+
+    // Apply continuous autofocus after stream is acquired (works on Android Chrome)
+    const videoTrack = acquiredStream.getVideoTracks()[0]
+    if (videoTrack) {
+      const capabilities = videoTrack.getCapabilities() as MediaTrackCapabilities & { focusMode?: string[] }
+      if (capabilities.focusMode?.includes('continuous')) {
+        videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet] }).catch(() => {
+          // Not all devices support this — ignore silently
+        })
+      }
     }
 
     streamRef.current = acquiredStream
