@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="#1a1a2e"/>
+  <!-- Label/tag shape: rounded rectangle representing a peeled-off label -->
+  <rect x="96" y="140" width="320" height="200" rx="16" fill="none" stroke="#e94560" stroke-width="20"/>
+  <!-- Horizontal lines suggesting printed text on a label -->
+  <line x1="140" y1="196" x2="372" y2="196" stroke="#e94560" stroke-width="12" stroke-linecap="round"/>
+  <line x1="140" y1="236" x2="320" y2="236" stroke="#e94560" stroke-width="12" stroke-linecap="round" opacity="0.7"/>
+  <line x1="140" y1="276" x2="340" y2="276" stroke="#e94560" stroke-width="12" stroke-linecap="round" opacity="0.7"/>
+  <!-- Unwrap arrow: curved arrow going from cylinder to flat -->
+  <path d="M 180 380 Q 256 420 332 380" fill="none" stroke="#0f3460" stroke-width="14" stroke-linecap="round"/>
+  <polyline points="316,366 332,380 318,396" fill="none" stroke="#0f3460" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Small cylinder indicator top-left corner -->
+  <ellipse cx="130" cy="160" rx="18" ry="8" fill="#e94560" opacity="0.5"/>
+  <rect x="112" y="160" width="36" height="30" fill="#e94560" opacity="0.3"/>
+  <ellipse cx="130" cy="190" rx="18" ry="8" fill="#e94560" opacity="0.5"/>
+</svg>
