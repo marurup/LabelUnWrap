@@ -1,8 +1,10 @@
 /**
  * stitcher.worker.ts
  *
- * Web Worker that implements panorama stitching + cylindrical unwarp
- * using pure TypeScript (no OpenCV dependency).
+ * Web Worker: panorama stitching via SAD-based overlap detection + alpha blending.
+ * No cylindrical unwarp on the full panorama — phone camera FOV is small enough
+ * (~60–70°) that individual frames are already nearly flat. Applying the unwarp
+ * to a multi-frame-wide panorama causes extreme tan() divergence at the edges.
  */
 
 type WorkerInput = { type: 'stitch'; frames: ImageData[] }
@@ -16,7 +18,11 @@ type WorkerOutput =
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Bilinear interpolation of a single channel value at fractional (x, y). */
+function clamp(v: number, min: number, max: number): number {
+  return v < min ? min : v > max ? max : v
+}
+
+/** Bilinear interpolation of a single channel at fractional (x, y). */
 function bilinearSample(
   data: Uint8ClampedArray,
   width: number,
@@ -29,23 +35,55 @@ function bilinearSample(
   const y0 = Math.floor(y)
   const x1 = Math.min(x0 + 1, width - 1)
   const y1 = Math.min(y0 + 1, height - 1)
-
   const fx = x - x0
   const fy = y - y0
-
-  const idx00 = (y0 * width + x0) * 4 + channel
-  const idx10 = (y0 * width + x1) * 4 + channel
-  const idx01 = (y1 * width + x0) * 4 + channel
-  const idx11 = (y1 * width + x1) * 4 + channel
-
-  const top = data[idx00] * (1 - fx) + data[idx10] * fx
-  const bot = data[idx01] * (1 - fx) + data[idx11] * fx
-  return top * (1 - fy) + bot * fy
+  const v00 = data[(y0 * width + x0) * 4 + channel]
+  const v10 = data[(y0 * width + x1) * 4 + channel]
+  const v01 = data[(y1 * width + x0) * 4 + channel]
+  const v11 = data[(y1 * width + x1) * 4 + channel]
+  return v00 * (1 - fx) * (1 - fy) + v10 * fx * (1 - fy) + v01 * (1 - fx) * fy + v11 * fx * fy
 }
 
-/** Clamp a number to [min, max]. */
-function clamp(v: number, min: number, max: number): number {
-  return v < min ? min : v > max ? max : v
+/** Extract a grayscale (luminance) column strip from an ImageData. */
+function extractStrip(
+  img: ImageData,
+  xStart: number,
+  stripW: number,
+  yStart: number,
+  yEnd: number,
+): Float32Array {
+  const rows = yEnd - yStart
+  const buf = new Float32Array(rows * stripW)
+  for (let dy = 0; dy < rows; dy++) {
+    for (let dx = 0; dx < stripW; dx++) {
+      const x = xStart + dx
+      const y = yStart + dy
+      if (x < 0 || x >= img.width) { buf[dy * stripW + dx] = 0; continue }
+      const i = (y * img.width + x) * 4
+      buf[dy * stripW + dx] =
+        0.299 * img.data[i] + 0.587 * img.data[i + 1] + 0.114 * img.data[i + 2]
+    }
+  }
+  return buf
+}
+
+/** Normalised cross-correlation between two equal-length Float32Arrays. */
+function ncc(a: Float32Array, b: Float32Array): number {
+  let sumA = 0, sumB = 0
+  const n = a.length
+  for (let i = 0; i < n; i++) { sumA += a[i]; sumB += b[i] }
+  const meanA = sumA / n
+  const meanB = sumB / n
+  let num = 0, denA = 0, denB = 0
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA
+    const db = b[i] - meanB
+    num += da * db
+    denA += da * da
+    denB += db * db
+  }
+  const den = Math.sqrt(denA * denB)
+  return den < 1e-6 ? 0 : num / den
 }
 
 // ---------------------------------------------------------------------------
@@ -53,69 +91,67 @@ function clamp(v: number, min: number, max: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Estimate the horizontal overlap offset between two adjacent frames.
- * We take a vertical strip from the right edge of frameA and slide it
- * against strips at various positions in frameB, minimising SAD.
+ * Estimate the horizontal offset between two adjacent frames using NCC.
  *
- * Returns the number of pixels frameB should be placed to the right of frameA's
- * left edge (i.e., frameA starts at 0, frameB starts at `offset`).
+ * "offset" = how far to the right frameB starts relative to frameA's left edge.
+ * A fully non-overlapping pair has offset = frameWidth.
+ * A pair with 30% overlap has offset = 0.7 * frameWidth.
+ *
+ * Strategy:
+ *  1. Coarse search (step = 8 px) across 10–80% overlap range
+ *  2. Fine search (step = 1 px) in a ±32 px window around the coarse best
+ *
+ * We compare a 20%-wide strip from the right edge of A against the same-width
+ * strip from the left edge of B's overlap region.
  */
 function findOffset(frameA: ImageData, frameB: ImageData): number {
-  const w = frameA.width
-  const h = frameA.height
-  const stripW = Math.max(8, Math.round(w * 0.05)) // 5% strip width
-  const maxOverlap = Math.round(w * 0.7) // search up to 70% overlap
+  const fw = frameA.width
+  const fh = frameA.height
 
-  // Vertical sampling: use the middle third to avoid edge artifacts
-  const yStart = Math.floor(h * 0.33)
-  const yEnd = Math.floor(h * 0.67)
-  const rows = yEnd - yStart
+  // Use the middle 60% of rows to avoid letterbox/black borders
+  const yStart = Math.floor(fh * 0.2)
+  const yEnd = Math.floor(fh * 0.8)
 
-  // Pre-extract the reference strip from the RIGHT edge of frameA
-  // We'll compare against strips starting at position `s` from the LEFT of frameB
-  let bestOffset = w // default: no overlap
-  let bestSAD = Infinity
+  // Comparison strip width: 20% of frame width
+  const stripW = Math.max(16, Math.round(fw * 0.20))
 
-  // offset = how far to the right frameB starts relative to frameA's left
-  // overlap = w - offset (pixels that overlap)
-  // We want offset in [w - maxOverlap, w]
-  const minOffset = w - maxOverlap
+  // Overlap search range: 10% to 80% of frame width
+  const minOverlap = Math.round(fw * 0.10)
+  const maxOverlap = Math.round(fw * 0.80)
 
-  for (let offset = minOffset; offset <= w; offset += 2) {
-    const overlap = w - offset
-    if (overlap <= 0) break
+  // Pre-extract a strip from the left edge of frameB (0..stripW)
+  const stripB = extractStrip(frameB, 0, stripW, yStart, yEnd)
 
-    // The reference strip position in frameA: right side starting at (w - overlap)
-    const refXInA = w - overlap
-    // The comparison strip position in frameB: left side, same width (overlap pixels, but we only check stripW of them)
-    const checkW = Math.min(stripW, overlap)
+  let bestOffset = fw  // default: no overlap
+  let bestScore = -Infinity
 
-    let sad = 0
-    for (let dy = 0; dy < rows; dy++) {
-      const row = yStart + dy
-      for (let dx = 0; dx < checkW; dx++) {
-        const axA = refXInA + dx
-        const axB = dx // same relative position in frameB's overlap zone
-        const idxA = (row * w + axA) * 4
-        const idxB = (row * w + axB) * 4
-        // Use luminance approximation: 0.299R + 0.587G + 0.114B
-        const lumA =
-          0.299 * frameA.data[idxA] +
-          0.587 * frameA.data[idxA + 1] +
-          0.114 * frameA.data[idxA + 2]
-        const lumB =
-          0.299 * frameB.data[idxB] +
-          0.587 * frameB.data[idxB + 1] +
-          0.114 * frameB.data[idxB + 2]
-        sad += Math.abs(lumA - lumB)
-      }
+  function evaluate(overlap: number): number {
+    if (overlap < minOverlap || overlap > maxOverlap) return -Infinity
+    // In frameA, the overlap region starts at (fw - overlap)
+    // We compare the LEFT part of the overlap (first stripW pixels)
+    const stripA = extractStrip(frameA, fw - overlap, stripW, yStart, yEnd)
+    return ncc(stripA, stripB)
+  }
+
+  // Coarse pass
+  const coarseStep = 8
+  for (let overlap = minOverlap; overlap <= maxOverlap; overlap += coarseStep) {
+    const score = evaluate(overlap)
+    if (score > bestScore) {
+      bestScore = score
+      bestOffset = fw - overlap
     }
+  }
 
-    // Normalize by number of samples
-    const normSAD = sad / (rows * checkW)
-    if (normSAD < bestSAD) {
-      bestSAD = normSAD
-      bestOffset = offset
+  // Fine pass: ±32 px around coarse best
+  const coarseBestOverlap = fw - bestOffset
+  const fineStart = Math.max(minOverlap, coarseBestOverlap - 32)
+  const fineEnd = Math.min(maxOverlap, coarseBestOverlap + 32)
+  for (let overlap = fineStart; overlap <= fineEnd; overlap++) {
+    const score = evaluate(overlap)
+    if (score > bestScore) {
+      bestScore = score
+      bestOffset = fw - overlap
     }
   }
 
@@ -127,62 +163,50 @@ function findOffset(frameA: ImageData, frameB: ImageData): number {
 // ---------------------------------------------------------------------------
 
 function stitchFrames(frames: ImageData[]): ImageData {
-  if (frames.length === 0) {
-    throw new Error('No frames to stitch')
-  }
-  if (frames.length === 1) {
-    return frames[0]
-  }
+  if (frames.length === 0) throw new Error('No frames to stitch')
+  if (frames.length === 1) return frames[0]
 
-  const h = frames[0].height
-  const w = frames[0].width
+  const fh = frames[0].height
+  const fw = frames[0].width
 
-  // Compute pairwise offsets (where each frame starts relative to the previous)
-  const offsets: number[] = [0]
+  // Compute cumulative x-positions for each frame
+  const xPositions: number[] = [0]
   for (let i = 1; i < frames.length; i++) {
     const off = findOffset(frames[i - 1], frames[i])
-    offsets.push(offsets[i - 1] + off)
+    xPositions.push(xPositions[i - 1] + off)
   }
 
-  // Total canvas width
-  const lastFrameEnd = offsets[offsets.length - 1] + w
-  const canvasW = lastFrameEnd
+  const totalW = xPositions[xPositions.length - 1] + fw
 
-  const out = new ImageData(canvasW, h)
-  const outData = out.data
-
-  // Accumulator for alpha blending: store [R, G, B, weight] per pixel
-  // We'll use two passes: first accumulate, then normalize
-  const accum = new Float32Array(canvasW * h * 4).fill(0)
+  // Accumulator: [R·w, G·w, B·w, weight] per pixel
+  const accum = new Float32Array(totalW * fh * 4)
 
   for (let fi = 0; fi < frames.length; fi++) {
     const frame = frames[fi]
-    const xStart = offsets[fi]
-    const xEnd = xStart + w
+    const xStart = xPositions[fi]
+    const xEnd = xStart + fw
 
-    // Overlap with previous frame: overlap region is [xStart, prevEnd]
-    const prevEnd = fi > 0 ? offsets[fi - 1] + w : xStart
+    // Overlap zone with the PREVIOUS frame
+    const prevEnd = fi > 0 ? xPositions[fi - 1] + fw : xStart
     const overlapStart = xStart
     const overlapEnd = Math.min(prevEnd, xEnd)
     const overlapW = Math.max(0, overlapEnd - overlapStart)
 
-    for (let py = 0; py < h; py++) {
-      for (let px = 0; px < w; px++) {
-        const globalX = xStart + px
-        if (globalX < 0 || globalX >= canvasW) continue
+    for (let py = 0; py < fh; py++) {
+      for (let px = 0; px < fw; px++) {
+        const gx = xStart + px
+        if (gx < 0 || gx >= totalW) continue
 
-        const srcIdx = (py * w + px) * 4
-        const dstIdx = (py * canvasW + globalX) * 4
+        const srcIdx = (py * fw + px) * 4
+        const dstIdx = (py * totalW + gx) * 4
 
-        // Compute blend weight based on position within overlap
+        // Linear feathering within the overlap zone
         let weight = 1.0
-        if (overlapW > 0 && globalX < overlapEnd && globalX >= overlapStart) {
-          // Linear blend: 0 at start of overlap → 1 at end of overlap
-          const t = (globalX - overlapStart) / overlapW
-          weight = t
+        if (overlapW > 0 && gx >= overlapStart && gx < overlapEnd) {
+          weight = (gx - overlapStart) / overlapW  // 0 → 1 across overlap
         }
 
-        accum[dstIdx] += frame.data[srcIdx] * weight
+        accum[dstIdx]     += frame.data[srcIdx]     * weight
         accum[dstIdx + 1] += frame.data[srcIdx + 1] * weight
         accum[dstIdx + 2] += frame.data[srcIdx + 2] * weight
         accum[dstIdx + 3] += weight
@@ -190,15 +214,16 @@ function stitchFrames(frames: ImageData[]): ImageData {
     }
   }
 
-  // Normalize
-  for (let i = 0; i < canvasW * h; i++) {
-    const base = i * 4
-    const w4 = accum[base + 3]
-    if (w4 > 0) {
-      outData[base] = Math.round(clamp(accum[base] / w4, 0, 255))
-      outData[base + 1] = Math.round(clamp(accum[base + 1] / w4, 0, 255))
-      outData[base + 2] = Math.round(clamp(accum[base + 2] / w4, 0, 255))
-      outData[base + 3] = 255
+  // Normalise
+  const out = new ImageData(totalW, fh)
+  for (let i = 0; i < totalW * fh; i++) {
+    const b = i * 4
+    const wt = accum[b + 3]
+    if (wt > 0) {
+      out.data[b]     = Math.round(clamp(accum[b]     / wt, 0, 255))
+      out.data[b + 1] = Math.round(clamp(accum[b + 1] / wt, 0, 255))
+      out.data[b + 2] = Math.round(clamp(accum[b + 2] / wt, 0, 255))
+      out.data[b + 3] = 255
     }
   }
 
@@ -206,73 +231,62 @@ function stitchFrames(frames: ImageData[]): ImageData {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 – cylindricalUnwarp
+// Step 3 – per-frame barrel distortion correction (mild)
 // ---------------------------------------------------------------------------
 
 /**
- * Cylindrical unwarp: maps each output pixel through an inverse cylindrical
- * projection to find its source coordinates, then bilinear-interpolates.
- *
- * Forward model: a point on the cylinder at angle theta maps to image x via
- *   x_img = f * tan(theta) + cx
- *   y_img = y * sec(theta)    (with vertical scaling from cylinder height)
- *
- * Inverse (given output pixel (ox, oy) on the "flat" panorama):
- *   theta = (ox - cx) / f
- *   src_x = f * tan(theta) + cx
- *   src_y = oy / cos(theta)
+ * Correct barrel/pincushion distortion on a single frame before stitching.
+ * Uses a simple radial model: r_src = r_dst * (1 + k * r_dst²)
+ * k is estimated from frame width assuming a typical phone FOV (~70°).
+ * This is much milder than the full cylindrical unwarp and avoids
+ * the divergence problem when applied to a wide panorama.
  */
-function cylindricalUnwarp(img: ImageData): ImageData {
+function correctBarrel(img: ImageData): ImageData {
   const { width, height, data } = img
   const cx = width / 2
   const cy = height / 2
-
-  // FOV = 60 degrees → f = w / (2 * tan(FOV/2))
-  const FOV_RAD = (60 * Math.PI) / 180
-  const f = width / (2 * Math.tan(FOV_RAD / 2))
+  // Barrel correction coefficient — tuned for ~70° diagonal FOV phone cameras
+  // Positive k = barrel (outward), negative = pincushion
+  const k = 0.15
+  const R2 = Math.max(cx * cx, cy * cy) // normalisation radius²
 
   const out = new ImageData(width, height)
   const outData = out.data
 
   for (let oy = 0; oy < height; oy++) {
     for (let ox = 0; ox < width; ox++) {
-      const theta = (ox - cx) / f
-      const srcX = f * Math.tan(theta) + cx
-      const srcY = (oy - cy) / Math.cos(theta) + cy
+      const dx = ox - cx
+      const dy = oy - cy
+      const r2 = (dx * dx + dy * dy) / R2
+      const scale = 1 + k * r2
+      const srcX = cx + dx * scale
+      const srcY = cy + dy * scale
 
       const dstIdx = (oy * width + ox) * 4
-
       if (srcX < 0 || srcX >= width - 1 || srcY < 0 || srcY >= height - 1) {
-        // Out of bounds — leave transparent black (already 0 from ImageData init)
         outData[dstIdx + 3] = 0
         continue
       }
-
-      outData[dstIdx] = Math.round(bilinearSample(data, width, height, srcX, srcY, 0))
+      outData[dstIdx]     = Math.round(bilinearSample(data, width, height, srcX, srcY, 0))
       outData[dstIdx + 1] = Math.round(bilinearSample(data, width, height, srcX, srcY, 1))
       outData[dstIdx + 2] = Math.round(bilinearSample(data, width, height, srcX, srcY, 2))
       outData[dstIdx + 3] = 255
     }
   }
-
   return out
 }
 
 // ---------------------------------------------------------------------------
-// Crop transparent edges
+// Crop transparent / black edges
 // ---------------------------------------------------------------------------
 
-function cropToOpaque(img: ImageData): ImageData {
+function cropToContent(img: ImageData): ImageData {
   const { width, height, data } = img
-  let minX = width
-  let maxX = 0
-  let minY = height
-  let maxY = 0
+  let minX = width, maxX = 0, minY = height, maxY = 0
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const alpha = data[(y * width + x) * 4 + 3]
-      if (alpha > 0) {
+      if (data[(y * width + x) * 4 + 3] > 0) {
         if (x < minX) minX = x
         if (x > maxX) maxX = x
         if (y < minY) minY = y
@@ -281,23 +295,21 @@ function cropToOpaque(img: ImageData): ImageData {
     }
   }
 
-  if (minX > maxX || minY > maxY) return img // nothing to crop
+  if (minX > maxX || minY > maxY) return img
 
-  const newW = maxX - minX + 1
-  const newH = maxY - minY + 1
-  const cropped = new ImageData(newW, newH)
-
-  for (let y = 0; y < newH; y++) {
-    for (let x = 0; x < newW; x++) {
-      const srcIdx = ((minY + y) * width + (minX + x)) * 4
-      const dstIdx = (y * newW + x) * 4
-      cropped.data[dstIdx] = data[srcIdx]
-      cropped.data[dstIdx + 1] = data[srcIdx + 1]
-      cropped.data[dstIdx + 2] = data[srcIdx + 2]
-      cropped.data[dstIdx + 3] = data[srcIdx + 3]
+  const nw = maxX - minX + 1
+  const nh = maxY - minY + 1
+  const cropped = new ImageData(nw, nh)
+  for (let y = 0; y < nh; y++) {
+    for (let x = 0; x < nw; x++) {
+      const si = ((minY + y) * width + (minX + x)) * 4
+      const di = (y * nw + x) * 4
+      cropped.data[di]     = data[si]
+      cropped.data[di + 1] = data[si + 1]
+      cropped.data[di + 2] = data[si + 2]
+      cropped.data[di + 3] = data[si + 3]
     }
   }
-
   return cropped
 }
 
@@ -308,49 +320,43 @@ function cropToOpaque(img: ImageData): ImageData {
 self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
   const msg = event.data
 
-  if (msg.type === 'stitch') {
-    try {
-      const { frames } = msg
+  if (msg.type !== 'stitch') {
+    self.postMessage({ type: 'error', message: `Unknown message type: ${(msg as {type:string}).type}` } as WorkerOutput)
+    return
+  }
 
-      if (!frames || frames.length === 0) {
-        const out: WorkerOutput = { type: 'error', message: 'No frames provided' }
-        self.postMessage(out)
-        return
-      }
+  try {
+    const { frames } = msg
 
-      const post = (output: WorkerOutput) => self.postMessage(output)
-
-      post({ type: 'progress', step: 'Analyzing frames...', percent: 10 })
-
-      // Short yield to allow the progress message to flush
-      // (workers are single-threaded, but postMessage is async on the receiving end)
-
-      post({ type: 'progress', step: 'Finding overlaps...', percent: 30 })
-
-      post({ type: 'progress', step: 'Stitching...', percent: 60 })
-      const stitched = stitchFrames(frames)
-
-      post({ type: 'progress', step: 'Unwarping...', percent: 80 })
-      const unwarped = cylindricalUnwarp(stitched)
-      const cropped = cropToOpaque(unwarped)
-
-      post({ type: 'progress', step: 'Done', percent: 100 })
-      const result: WorkerOutput = { type: 'result', imageData: cropped }
-      // Transfer the underlying ArrayBuffer to avoid copying large data
-      self.postMessage(result, { transfer: [cropped.data.buffer] })
-    } catch (err) {
-      const out: WorkerOutput = {
-        type: 'error',
-        message: err instanceof Error ? err.message : String(err),
-      }
-      self.postMessage(out)
+    if (!frames || frames.length === 0) {
+      self.postMessage({ type: 'error', message: 'No frames provided' } as WorkerOutput)
+      return
     }
-  } else {
-    const out: WorkerOutput = {
+
+    const post = (o: WorkerOutput) => self.postMessage(o)
+
+    post({ type: 'progress', step: 'Correcting lens distortion…', percent: 10 })
+    // Apply mild barrel correction to each frame individually
+    const corrected = frames.map(correctBarrel)
+
+    post({ type: 'progress', step: 'Finding overlaps…', percent: 30 })
+    // (findOffset runs inside stitchFrames)
+
+    post({ type: 'progress', step: 'Stitching frames…', percent: 55 })
+    const stitched = stitchFrames(corrected)
+
+    post({ type: 'progress', step: 'Cropping result…', percent: 85 })
+    const result = cropToContent(stitched)
+
+    post({ type: 'progress', step: 'Done', percent: 100 })
+    self.postMessage({ type: 'result', imageData: result } as WorkerOutput, {
+      transfer: [result.data.buffer],
+    })
+  } catch (err) {
+    self.postMessage({
       type: 'error',
-      message: `Unknown message type: ${(msg as { type: string }).type}`,
-    }
-    self.postMessage(out)
+      message: err instanceof Error ? err.message : String(err),
+    } as WorkerOutput)
   }
 })
 
