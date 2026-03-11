@@ -37,6 +37,8 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        navigateFallback: '/LabelUnWrap/index.html',
+        navigateFallbackDenylist: [/\/api\//],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/npm\/opencv\.js@1\.2\.1\/opencv\.js$/i,
