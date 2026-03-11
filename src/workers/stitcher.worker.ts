@@ -159,78 +159,6 @@ function findOffset(frameA: ImageData, frameB: ImageData): number {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 – stitchFrames
-// ---------------------------------------------------------------------------
-
-function stitchFrames(frames: ImageData[]): ImageData {
-  if (frames.length === 0) throw new Error('No frames to stitch')
-  if (frames.length === 1) return frames[0]
-
-  const fh = frames[0].height
-  const fw = frames[0].width
-
-  // Compute cumulative x-positions for each frame
-  const xPositions: number[] = [0]
-  for (let i = 1; i < frames.length; i++) {
-    const off = findOffset(frames[i - 1], frames[i])
-    xPositions.push(xPositions[i - 1] + off)
-  }
-
-  const totalW = xPositions[xPositions.length - 1] + fw
-
-  // Accumulator: [R·w, G·w, B·w, weight] per pixel
-  const accum = new Float32Array(totalW * fh * 4)
-
-  for (let fi = 0; fi < frames.length; fi++) {
-    const frame = frames[fi]
-    const xStart = xPositions[fi]
-    const xEnd = xStart + fw
-
-    // Overlap zone with the PREVIOUS frame
-    const prevEnd = fi > 0 ? xPositions[fi - 1] + fw : xStart
-    const overlapStart = xStart
-    const overlapEnd = Math.min(prevEnd, xEnd)
-    const overlapW = Math.max(0, overlapEnd - overlapStart)
-
-    for (let py = 0; py < fh; py++) {
-      for (let px = 0; px < fw; px++) {
-        const gx = xStart + px
-        if (gx < 0 || gx >= totalW) continue
-
-        const srcIdx = (py * fw + px) * 4
-        const dstIdx = (py * totalW + gx) * 4
-
-        // Linear feathering within the overlap zone
-        let weight = 1.0
-        if (overlapW > 0 && gx >= overlapStart && gx < overlapEnd) {
-          weight = (gx - overlapStart) / overlapW  // 0 → 1 across overlap
-        }
-
-        accum[dstIdx]     += frame.data[srcIdx]     * weight
-        accum[dstIdx + 1] += frame.data[srcIdx + 1] * weight
-        accum[dstIdx + 2] += frame.data[srcIdx + 2] * weight
-        accum[dstIdx + 3] += weight
-      }
-    }
-  }
-
-  // Normalise
-  const out = new ImageData(totalW, fh)
-  for (let i = 0; i < totalW * fh; i++) {
-    const b = i * 4
-    const wt = accum[b + 3]
-    if (wt > 0) {
-      out.data[b]     = Math.round(clamp(accum[b]     / wt, 0, 255))
-      out.data[b + 1] = Math.round(clamp(accum[b + 1] / wt, 0, 255))
-      out.data[b + 2] = Math.round(clamp(accum[b + 2] / wt, 0, 255))
-      out.data[b + 3] = 255
-    }
-  }
-
-  return out
-}
-
-// ---------------------------------------------------------------------------
 // Step 3 – per-frame barrel distortion correction (mild)
 // ---------------------------------------------------------------------------
 
@@ -334,18 +262,76 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
     }
 
     const post = (o: WorkerOutput) => self.postMessage(o)
+    const n = frames.length
 
-    post({ type: 'progress', step: 'Correcting lens distortion…', percent: 10 })
-    // Apply mild barrel correction to each frame individually
-    const corrected = frames.map(correctBarrel)
+    // Phase 1: barrel correction — 5%–30%, one update per frame
+    const corrected: ImageData[] = []
+    for (let i = 0; i < n; i++) {
+      const pct = Math.round(5 + (i / n) * 25)
+      post({ type: 'progress', step: `Correcting frame ${i + 1} of ${n}…`, percent: pct })
+      corrected.push(correctBarrel(frames[i]))
+    }
 
-    post({ type: 'progress', step: 'Finding overlaps…', percent: 30 })
-    // (findOffset runs inside stitchFrames)
+    // Phase 2: find overlaps — 30%–60%, one update per frame pair
+    const xPositions: number[] = [0]
+    for (let i = 1; i < n; i++) {
+      const pct = Math.round(30 + ((i - 1) / (n - 1)) * 30)
+      post({ type: 'progress', step: `Aligning frame ${i + 1} of ${n}…`, percent: pct })
+      const off = findOffset(corrected[i - 1], corrected[i])
+      xPositions.push(xPositions[i - 1] + off)
+    }
 
-    post({ type: 'progress', step: 'Stitching frames…', percent: 55 })
-    const stitched = stitchFrames(corrected)
+    // Phase 3: composite — 60%–85%, one update per frame
+    post({ type: 'progress', step: 'Compositing…', percent: 60 })
+    const fh = corrected[0].height
+    const fw = corrected[0].width
+    const totalW = xPositions[xPositions.length - 1] + fw
+    const accum = new Float32Array(totalW * fh * 4)
 
-    post({ type: 'progress', step: 'Cropping result…', percent: 85 })
+    for (let fi = 0; fi < n; fi++) {
+      const pct = Math.round(60 + (fi / n) * 25)
+      post({ type: 'progress', step: `Blending frame ${fi + 1} of ${n}…`, percent: pct })
+
+      const frame = corrected[fi]
+      const xStart = xPositions[fi]
+      const xEnd = xStart + fw
+      const prevEnd = fi > 0 ? xPositions[fi - 1] + fw : xStart
+      const overlapStart = xStart
+      const overlapEnd = Math.min(prevEnd, xEnd)
+      const overlapW = Math.max(0, overlapEnd - overlapStart)
+
+      for (let py = 0; py < fh; py++) {
+        for (let px = 0; px < fw; px++) {
+          const gx = xStart + px
+          if (gx < 0 || gx >= totalW) continue
+          const srcIdx = (py * fw + px) * 4
+          const dstIdx = (py * totalW + gx) * 4
+          let weight = 1.0
+          if (overlapW > 0 && gx >= overlapStart && gx < overlapEnd) {
+            weight = (gx - overlapStart) / overlapW
+          }
+          accum[dstIdx]     += frame.data[srcIdx]     * weight
+          accum[dstIdx + 1] += frame.data[srcIdx + 1] * weight
+          accum[dstIdx + 2] += frame.data[srcIdx + 2] * weight
+          accum[dstIdx + 3] += weight
+        }
+      }
+    }
+
+    // Normalise
+    const stitched = new ImageData(totalW, fh)
+    for (let i = 0; i < totalW * fh; i++) {
+      const b = i * 4
+      const wt = accum[b + 3]
+      if (wt > 0) {
+        stitched.data[b]     = Math.round(clamp(accum[b]     / wt, 0, 255))
+        stitched.data[b + 1] = Math.round(clamp(accum[b + 1] / wt, 0, 255))
+        stitched.data[b + 2] = Math.round(clamp(accum[b + 2] / wt, 0, 255))
+        stitched.data[b + 3] = 255
+      }
+    }
+
+    post({ type: 'progress', step: 'Cropping result…', percent: 88 })
     const result = cropToContent(stitched)
 
     post({ type: 'progress', step: 'Done', percent: 100 })
