@@ -1,0 +1,84 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  /* Safe area padding so content clears notch/home bar */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Minimal header — just the progress dots, no title needed */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-sm) var(--spacing-md);
+  padding-top: calc(var(--spacing-sm) + var(--safe-top));
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+/* Keep the logo element for backward-compat but hide it */
+.logo {
+  display: none;
+}
+
+.logo span {
+  color: var(--color-accent);
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* On tablets, constrain camera viewfinder so it doesn't stretch */
+@media (min-width: 768px) {
+  .main {
+    align-items: center;
+  }
+
+  .main > * {
+    width: 100%;
+    max-width: 480px;
+  }
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-sm) var(--spacing-md);
+  padding-bottom: calc(var(--spacing-sm) + var(--safe-bottom));
+  background-color: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+/* Progress dots — centered, evenly spaced */
+.stateIndicator {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+}
+
+.stateDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--color-border);
+  transition: background-color var(--transition-normal);
+}
+
+.stateDotActive {
+  background-color: var(--color-accent);
+}
