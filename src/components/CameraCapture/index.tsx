@@ -4,6 +4,7 @@ import styles from './CameraCapture.module.css'
 
 interface CameraCaptureProps {
   onCapture: (frames: Blob[]) => void
+  devMode?: boolean
 }
 
 type CaptureMode = 'photo' | 'video'
@@ -14,7 +15,7 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-export function CameraCapture({ onCapture }: CameraCaptureProps) {
+export function CameraCapture({ onCapture, devMode = false }: CameraCaptureProps) {
   const { stream, error, isLoading, startCamera, stopCamera, capturePhoto, videoRef } = useCamera()
   const [mode, setMode] = useState<CaptureMode>('photo')
   const [photos, setPhotos] = useState<Blob[]>([])
@@ -24,6 +25,8 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const recordedChunksRef = useRef<Blob[]>([])
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+  const photoInputRef = useRef<HTMLInputElement>(null)
 
   // Start camera on mount
   useEffect(() => {
@@ -125,6 +128,23 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
     }
   }, [])
 
+  // ── Dev mode upload handlers ─────────────────────────────────────────────
+  const handleDevVideoUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    stopCamera()
+    onCapture([file])
+    e.target.value = ''
+  }, [stopCamera, onCapture])
+
+  const handleDevPhotoUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    if (files.length === 0) return
+    stopCamera()
+    onCapture(files)
+    e.target.value = ''
+  }, [stopCamera, onCapture])
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className={styles.wrapper}>
@@ -162,6 +182,34 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
           <button className={styles.retryBtn} onClick={startCamera}>
             Retry
           </button>
+        </div>
+      )}
+
+      {/* Dev mode upload bar */}
+      {devMode && (
+        <div className={styles.devBar}>
+          <span className={styles.devBadge}>DEV</span>
+          <button className={styles.devBtn} onClick={() => videoInputRef.current?.click()}>
+            Upload Video
+          </button>
+          <button className={styles.devBtn} onClick={() => photoInputRef.current?.click()}>
+            Upload Photos
+          </button>
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept="video/*"
+            style={{ display: 'none' }}
+            onChange={handleDevVideoUpload}
+          />
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: 'none' }}
+            onChange={handleDevPhotoUpload}
+          />
         </div>
       )}
 
