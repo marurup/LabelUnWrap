@@ -8,6 +8,7 @@
 export async function extractFrames(
   videoBlob: Blob,
   targetCount: number,
+  onProgress?: (extracted: number, total: number) => void,
 ): Promise<Blob[]> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(videoBlob)
@@ -75,6 +76,7 @@ export async function extractFrames(
       if (t - lastCaptureTime >= captureInterval) {
         lastCaptureTime = t
         captureFrame()
+        onProgress?.(frames.length, targetCount)
       }
     })
 

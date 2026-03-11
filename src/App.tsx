@@ -5,6 +5,7 @@ import { FrameReview } from './components/FrameReview'
 import { InstallPrompt } from './components/InstallPrompt'
 import { LandingPage } from './components/LandingPage'
 import { ProcessingView } from './components/ProcessingView'
+import { ProgressCard } from './components/ProgressCard'
 import { ResultView } from './components/ResultView'
 import { extractFrames } from './lib/frameSelector'
 
@@ -19,13 +20,17 @@ function App() {
   const [capturedFrames, setCapturedFrames] = useState<Blob[]>([])
   const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [isExtracting, setIsExtracting] = useState(false)
+  const [extractionProgress, setExtractionProgress] = useState({ current: 0, total: VIDEO_FRAME_TARGET })
 
   const handleCapture = async (blobs: Blob[]) => {
     // Single video blob → extract frames on the main thread
     if (blobs.length === 1 && blobs[0].type.startsWith('video/')) {
       setIsExtracting(true)
+      setExtractionProgress({ current: 0, total: VIDEO_FRAME_TARGET })
       try {
-        const frames = await extractFrames(blobs[0], VIDEO_FRAME_TARGET)
+        const frames = await extractFrames(blobs[0], VIDEO_FRAME_TARGET, (extracted, total) => {
+          setExtractionProgress({ current: extracted, total })
+        })
         setCapturedFrames(frames)
         setAppState('review')
       } catch (err) {
@@ -110,30 +115,12 @@ function App() {
 
       <main className={styles.main}>
         {isExtracting ? (
-          <div
-            style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 16,
-              color: 'var(--color-text-muted)',
-            }}
-            role="status"
-          >
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                border: '3px solid rgba(255,255,255,0.15)',
-                borderTopColor: 'var(--color-accent)',
-                borderRadius: '50%',
-                animation: 'spin 0.7s linear infinite',
-              }}
-            />
-            <p>Extracting frames…</p>
-          </div>
+          <ProgressCard
+            title="Extracting Frames"
+            step={`Captured ${extractionProgress.current} of ${extractionProgress.total} frames…`}
+            percent={Math.round((extractionProgress.current / extractionProgress.total) * 100)}
+            detail="Playing video at high speed to sample frames"
+          />
         ) : (
           renderView()
         )}

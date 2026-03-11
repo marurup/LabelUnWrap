@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import styles from './ProcessingView.module.css'
+import { ProgressCard } from '../ProgressCard'
 import { processFrames } from '../../lib/stitcher'
 
 interface ProcessingViewProps {
@@ -9,7 +10,7 @@ interface ProcessingViewProps {
 }
 
 export function ProcessingView({ frames, onComplete, onError }: ProcessingViewProps) {
-  const [step, setStep] = useState('Preparing...')
+  const [step, setStep] = useState('Preparing…')
   const [percent, setPercent] = useState(0)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -52,34 +53,11 @@ export function ProcessingView({ frames, onComplete, onError }: ProcessingViewPr
   }
 
   return (
-    <div className={styles.container}>
-      <div className={styles.card}>
-        <div className={styles.spinner} aria-hidden="true" />
-
-        <h2 className={styles.title}>Unwrapping Label…</h2>
-
-        <p className={styles.stepLabel} aria-live="polite">
-          {step}
-        </p>
-
-        <div
-          className={styles.progressTrack}
-          role="progressbar"
-          aria-valuenow={percent}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Processing progress"
-        >
-          <div
-            className={styles.progressFill}
-            style={{ width: `${percent}%` }}
-          />
-        </div>
-
-        <p className={styles.frameCount}>
-          {frames.length} frame{frames.length !== 1 ? 's' : ''} to process
-        </p>
-      </div>
-    </div>
+    <ProgressCard
+      title="Unwrapping Label…"
+      step={step}
+      percent={percent}
+      detail={`${frames.length} frame${frames.length !== 1 ? 's' : ''} to process`}
+    />
   )
 }
