@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useDevMode } from './hooks/useDevMode'
 import styles from './App.module.css'
 import { CameraCapture } from './components/CameraCapture'
 import { FrameReview } from './components/FrameReview'
@@ -16,6 +17,7 @@ const STATE_ORDER: AppState[] = ['capture', 'review', 'processing', 'result']
 const VIDEO_FRAME_TARGET = 12
 
 function App() {
+  const devMode = useDevMode()
   const [appState, setAppState] = useState<AppState>('landing')
   const [capturedFrames, setCapturedFrames] = useState<Blob[]>([])
   const [resultBlob, setResultBlob] = useState<Blob | null>(null)
@@ -72,7 +74,7 @@ function App() {
       case 'landing':
         return <LandingPage onStart={() => setAppState('capture')} />
       case 'capture':
-        return <CameraCapture onCapture={handleCapture} />
+        return <CameraCapture onCapture={handleCapture} devMode={devMode} />
       case 'review':
         return (
           <FrameReview
