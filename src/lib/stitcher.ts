@@ -6,10 +6,15 @@
  * and resolves with a JPEG Blob when processing is complete.
  */
 
+import type { StitchDebugInfo } from '../workers/stitcher.worker'
+
 type WorkerOutput =
   | { type: 'progress'; step: string; percent: number }
-  | { type: 'result'; imageData: ImageData }
+  | { type: 'result'; imageData: ImageData; debugInfo: StitchDebugInfo }
   | { type: 'error'; message: string }
+
+let lastDebugInfo: StitchDebugInfo | null = null
+export function getLastDebugInfo(): StitchDebugInfo | null { return lastDebugInfo }
 
 /**
  * Convert a Blob to ImageData using createImageBitmap + OffscreenCanvas.
@@ -82,6 +87,7 @@ export async function processFrames(
         case 'result': {
           worker.removeEventListener('message', handleMessage)
           worker.removeEventListener('error', handleError)
+          lastDebugInfo = msg.debugInfo
           try {
             const blob = await imageDataToBlob(msg.imageData)
             resolve(blob)
