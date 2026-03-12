@@ -218,6 +218,26 @@
   visibility: hidden;
 }
 
+/* ── Background hint ────────────────────────────────────────────────────── */
+.bgHint {
+  position: absolute;
+  bottom: calc(100px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 6px 14px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.78rem;
+  font-weight: 500;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
 /* ── Error / loading states ─────────────────────────────────────────────── */
 .stateOverlay {
   position: absolute;

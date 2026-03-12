@@ -27,6 +27,7 @@ export async function extractFrames(
     let captureInterval = 0
     let duration = 0
     let settled = false
+    let pendingBlobs = 0
 
     function cleanup() {
       video.pause()
@@ -36,6 +37,7 @@ export async function extractFrames(
 
     function finish() {
       if (settled) return
+      if (pendingBlobs > 0) return  // wait for all toBlob() callbacks
       settled = true
       cleanup()
       resolve(frames)
@@ -43,9 +45,16 @@ export async function extractFrames(
 
     function captureFrame() {
       if (!canvas || !ctx) return
+      if (frames.length + pendingBlobs >= targetCount) return  // already have enough
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      pendingBlobs++
       canvas.toBlob(
-        (blob) => { if (blob) frames.push(blob) },
+        (blob) => {
+          if (blob) frames.push(blob)
+          pendingBlobs--
+          onProgress?.(frames.length, targetCount)
+          if (frames.length + pendingBlobs >= targetCount) finish()
+        },
         'image/jpeg',
         0.92,
       )
@@ -60,9 +69,9 @@ export async function extractFrames(
       ctx = canvas.getContext('2d')
 
       // If we know the duration, space frames evenly.
-      // If duration is still Infinity, sample every ~0.5 s of real video time.
+      // If duration is still Infinity, sample every ~0.3 s of real video time.
       duration = isFinite(video.duration) && video.duration > 0 ? video.duration : 0
-      captureInterval = duration > 0 ? duration / targetCount : 0.5
+      captureInterval = duration > 0 ? duration / targetCount : 0.3
 
       video.play().catch(() => {
         cleanup()
@@ -72,15 +81,19 @@ export async function extractFrames(
 
     video.addEventListener('timeupdate', () => {
       if (!canvas) return
+      if (frames.length + pendingBlobs >= targetCount) return
       const t = video.currentTime
       if (t - lastCaptureTime >= captureInterval) {
         lastCaptureTime = t
         captureFrame()
-        onProgress?.(frames.length, targetCount)
       }
     })
 
-    video.addEventListener('ended', finish)
+    video.addEventListener('ended', () => {
+      // Don't resolve immediately — wait for any pending toBlob() callbacks
+      if (pendingBlobs === 0) finish()
+      // else finish() will be called from the last toBlob() callback
+    })
 
     // Safety timeout: if the video never ends (e.g. stalls) resolve with what we have
     video.addEventListener('play', () => {

@@ -17,13 +17,13 @@ const BUILD_LABEL = BUILD_DATE.toLocaleString('en-GB', {
 const steps = [
   {
     number: '1',
-    title: 'Position your object',
-    body: 'Hold your phone parallel to the label. Start at one edge of the label.',
+    title: 'Choose your background',
+    body: 'Place the object in front of a plain, uniform background — a white wall or sheet of card works best. This is the most important step for a clean result.',
   },
   {
     number: '2',
-    title: 'Capture frames',
-    body: 'Tap the shutter as you slowly pan around the object. Overlap each shot by about 30%. Aim for 6–12 photos.',
+    title: 'Position and capture',
+    body: 'Hold your phone parallel to the label. Start at one edge and slowly pan around, tapping the shutter as you go. Overlap each shot by about 30%. Aim for 6–12 photos.',
   },
   {
     number: '3',
@@ -36,6 +36,8 @@ const steps = [
     body: 'Download the unwrapped label to your device or share it directly.',
   },
 ]
+
+const tip = 'Tip: a plain wall or white card behind the object makes unwrapping much more accurate.'
 
 export function LandingPage({ onStart }: LandingPageProps) {
   return (
@@ -70,6 +72,8 @@ export function LandingPage({ onStart }: LandingPageProps) {
           </li>
         ))}
       </ol>
+
+      <p className={styles.tip}>{tip}</p>
 
       <button className={styles.startButton} onClick={onStart}>
         Get Started

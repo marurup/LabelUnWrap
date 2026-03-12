@@ -100,6 +100,21 @@
   line-height: 1.5;
 }
 
+/* ── Background tip ───────────────────────────────────── */
+.tip {
+  width: 100%;
+  max-width: 360px;
+  margin: 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background: rgba(233, 69, 96, 0.12);
+  border: 1px solid rgba(233, 69, 96, 0.3);
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
 /* ── Start button ─────────────────────────────────────── */
 .startButton {
   width: 100%;
