@@ -100,19 +100,25 @@
   line-height: 1.5;
 }
 
-/* ── Background tip ───────────────────────────────────── */
-.tip {
+/* ── Tips button ──────────────────────────────────────── */
+.tipsButton {
   width: 100%;
   max-width: 360px;
-  margin: 0;
-  padding: var(--spacing-sm) var(--spacing-md);
+  padding: 10px 16px;
   border-radius: var(--radius-md);
-  background: rgba(233, 69, 96, 0.12);
-  border: 1px solid rgba(233, 69, 96, 0.3);
-  color: var(--color-text-muted);
-  font-size: 0.82rem;
-  line-height: 1.5;
+  border: 1px solid rgba(233, 69, 96, 0.35);
+  background: rgba(233, 69, 96, 0.08);
+  color: var(--color-accent);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
   text-align: center;
+  transition: background var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tipsButton:active {
+  background: rgba(233, 69, 96, 0.2);
 }
 
 /* ── Start button ─────────────────────────────────────── */
