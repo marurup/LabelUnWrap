@@ -139,68 +139,84 @@ function findOffset(frameA: ImageData, frameB: ImageData): { offset: number; ncc
 }
 
 // ---------------------------------------------------------------------------
-// Compositing
+// Compositing — cylindrical centre-strip projection
 // ---------------------------------------------------------------------------
 
 /**
- * Composite frames onto a canvas using overlap feathering combined with a
- * cosine per-frame centre-weight. Centre columns of each frame (the bottle)
- * dominate; edge columns (background) are naturally suppressed.
+ * Build the flat label image using a centre-strip cylindrical projection.
+ *
+ * Each frame "owns" the panorama region between the midpoints with its
+ * neighbours (Voronoi-style). For each owned output pixel we:
+ *   1. Find its source x in the owning frame's local coordinates.
+ *   2. Compute the viewing angle: θ = atan((src_x − cx) / f)
+ *   3. Apply cylindrical y-correction: src_y = cy + (oy − cy) / cos(θ)
+ *      This removes the vertical foreshortening that makes horizontal
+ *      label features (like the yellow line) appear to curve up/down at
+ *      the edges of the cylinder.
+ *   4. Bilinear-sample from the source frame.
+ *
+ * Focal length f is estimated assuming 60° horizontal FOV (typical portrait
+ * phone). Adjust FOV_DEG if the result looks too compressed or stretched.
  */
+const FOV_DEG = 60
+const FOV_RAD = (FOV_DEG * Math.PI) / 180
+
 function composite(frames: ImageData[], xPositions: number[]): ImageData {
+  const n = frames.length
   const fw = frames[0].width
   const fh = frames[0].height
-  const totalW = xPositions[xPositions.length - 1] + fw
+  const cx = fw / 2
+  const cy = fh / 2
+  // Focal length in pixels for the given FOV
+  const f = fw / (2 * Math.tan(FOV_RAD / 2))
 
-  // Precompute per-column centre weight for a single frame
-  const centreWeight = new Float32Array(fw)
-  for (let px = 0; px < fw; px++) {
-    centreWeight[px] = 0.5 - 0.5 * Math.cos(Math.PI * px / (fw - 1))
+  // Determine each frame's ownership zone in panorama coordinates
+  // (midpoint between adjacent frame centres)
+  const leftBound: number[] = []
+  const rightBound: number[] = []
+  for (let i = 0; i < n; i++) {
+    leftBound.push(i === 0
+      ? xPositions[0]
+      : (xPositions[i] + xPositions[i - 1]) / 2)
+    rightBound.push(i === n - 1
+      ? xPositions[n - 1] + fw
+      : (xPositions[i] + xPositions[i + 1]) / 2)
   }
 
-  const accum = new Float32Array(totalW * fh * 4) // [R·w, G·w, B·w, w]
-
-  for (let fi = 0; fi < frames.length; fi++) {
-    const frame = frames[fi]
-    const xStart = xPositions[fi]
-    const prevEnd = fi > 0 ? xPositions[fi - 1] + fw : xStart
-    const overlapStart = xStart
-    const overlapEnd = Math.min(prevEnd, xStart + fw)
-    const overlapW = Math.max(0, overlapEnd - overlapStart)
-
-    for (let py = 0; py < fh; py++) {
-      for (let px = 0; px < fw; px++) {
-        const gx = xStart + px
-        if (gx < 0 || gx >= totalW) continue
-
-        // Seam blend: transition from previous frame to current in the overlap zone
-        let seamBlend = 1.0
-        if (overlapW > 0 && gx >= overlapStart && gx < overlapEnd) {
-          seamBlend = (gx - overlapStart) / overlapW
-        }
-
-        // Combine seam blend with cosine centre-weight
-        const weight = seamBlend * centreWeight[px]
-
-        const si = (py * fw + px) * 4
-        const di = (py * totalW + gx) * 4
-        accum[di]     += frame.data[si]     * weight
-        accum[di + 1] += frame.data[si + 1] * weight
-        accum[di + 2] += frame.data[si + 2] * weight
-        accum[di + 3] += weight
-      }
-    }
-  }
-
+  const totalW = Math.round(rightBound[n - 1] - leftBound[0])
+  const panoOrigin = leftBound[0]
   const out = new ImageData(totalW, fh)
-  for (let i = 0; i < totalW * fh; i++) {
-    const b = i * 4
-    const w = accum[b + 3]
-    if (w > 0) {
-      out.data[b]     = Math.round(clamp(accum[b]     / w, 0, 255))
-      out.data[b + 1] = Math.round(clamp(accum[b + 1] / w, 0, 255))
-      out.data[b + 2] = Math.round(clamp(accum[b + 2] / w, 0, 255))
-      out.data[b + 3] = 255
+
+  for (let i = 0; i < n; i++) {
+    const lx = Math.round(leftBound[i]  - panoOrigin)
+    const rx = Math.round(rightBound[i] - panoOrigin)
+
+    for (let oy = 0; oy < fh; oy++) {
+      for (let gx = lx; gx < rx; gx++) {
+        // Source x in frame i's local coordinates
+        const srcX = (gx + panoOrigin) - xPositions[i]
+        if (srcX < 0 || srcX >= fw - 1) continue
+
+        // Cylindrical y-correction
+        const theta = Math.atan((srcX - cx) / f)
+        const srcY = cy + (oy - cy) / Math.cos(theta)
+        if (srcY < 0 || srcY >= fh - 1) continue
+
+        // Bilinear interpolation
+        const x0 = Math.floor(srcX), x1 = x0 + 1
+        const y0 = Math.floor(srcY), y1 = y0 + 1
+        const fx = srcX - x0, fy = srcY - y0
+        const di = (oy * totalW + gx) * 4
+
+        for (let c = 0; c < 3; c++) {
+          const v = frames[i].data[(y0 * fw + x0) * 4 + c] * (1 - fx) * (1 - fy)
+                  + frames[i].data[(y0 * fw + x1) * 4 + c] * fx       * (1 - fy)
+                  + frames[i].data[(y1 * fw + x0) * 4 + c] * (1 - fx) * fy
+                  + frames[i].data[(y1 * fw + x1) * 4 + c] * fx       * fy
+          out.data[di + c] = Math.round(clamp(v, 0, 255))
+        }
+        out.data[di + 3] = 255
+      }
     }
   }
   return out
