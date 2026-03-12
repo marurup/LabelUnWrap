@@ -253,6 +253,85 @@ function cropToContent(img: ImageData): ImageData {
   return out
 }
 
+/**
+ * Crop the panorama to the rows that contain the object, removing the
+ * uniform background above and below.
+ *
+ * Strategy: sample the four corners of the image to estimate the background
+ * colour. Then scan rows from top and bottom, discarding any row where most
+ * pixels are within BG_THRESH of the background colour. This works for any
+ * label colour as long as the background is plain (a wall, card, etc.).
+ */
+function cropBackground(img: ImageData): ImageData {
+  const { width, height, data } = img
+
+  // Sample background colour from a small patch at each corner
+  function sampleCorner(startX: number, startY: number): [number, number, number] {
+    const PATCH = 5
+    let r = 0, g = 0, b = 0, n = 0
+    for (let dy = 0; dy < PATCH; dy++) {
+      for (let dx = 0; dx < PATCH; dx++) {
+        const x = clamp(startX + dx, 0, width - 1)
+        const y = clamp(startY + dy, 0, height - 1)
+        const i = (y * width + x) * 4
+        r += data[i]; g += data[i + 1]; b += data[i + 2]
+        n++
+      }
+    }
+    return [r / n, g / n, b / n]
+  }
+
+  const corners = [
+    sampleCorner(0, 0),
+    sampleCorner(width - 5, 0),
+    sampleCorner(0, height - 5),
+    sampleCorner(width - 5, height - 5),
+  ]
+  const bgR = corners.reduce((s, c) => s + c[0], 0) / 4
+  const bgG = corners.reduce((s, c) => s + c[1], 0) / 4
+  const bgB = corners.reduce((s, c) => s + c[2], 0) / 4
+
+  // A row is "background" if most of its pixels are close to the bg colour
+  const BG_THRESH = 40       // colour distance to count as "background pixel"
+  const BG_ROW_FRAC = 0.75   // fraction of pixels that must match bg for the row to be bg
+
+  function isBackgroundRow(y: number): boolean {
+    let bgCount = 0
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
+      const dr = data[i]     - bgR
+      const dg = data[i + 1] - bgG
+      const db = data[i + 2] - bgB
+      if (Math.sqrt(dr * dr + dg * dg + db * db) < BG_THRESH) bgCount++
+    }
+    return bgCount / width >= BG_ROW_FRAC
+  }
+
+  let y0 = 0
+  while (y0 < height && isBackgroundRow(y0)) y0++
+
+  let y1 = height - 1
+  while (y1 > y0 && isBackgroundRow(y1)) y1--
+
+  // If we stripped less than 5% of height, the background wasn't uniform enough
+  // to detect — return original to avoid false crops
+  if (y0 === 0 && y1 === height - 1) return img
+  if (y1 - y0 < height * 0.1) return img
+
+  // Small margin so we don't clip the very edge of the label
+  const margin = Math.round(height * 0.01)
+  y0 = Math.max(0, y0 - margin)
+  y1 = Math.min(height - 1, y1 + margin)
+  const nh = y1 - y0 + 1
+
+  const out = new ImageData(width, nh)
+  for (let y = 0; y < nh; y++) {
+    const si = (y0 + y) * width * 4
+    out.data.set(data.subarray(si, si + width * 4), y * width * 4)
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
@@ -293,7 +372,8 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
     const stitched = composite(frames, xPositions)
 
     post({ type: 'progress', step: 'Cropping…', percent: 90 })
-    const result = cropToContent(stitched)
+    const cropped = cropToContent(stitched)
+    const result = cropBackground(cropped)
 
     const fw = frames[0].width
     const debugInfo: StitchDebugInfo = {

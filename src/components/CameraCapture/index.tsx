@@ -167,6 +167,13 @@ export function CameraCapture({ onCapture, devMode = false }: CameraCaptureProps
         </div>
       )}
 
+      {/* Background hint — shown before first photo/recording */}
+      {stream && !isRecording && photos.length === 0 && (
+        <div className={styles.bgHint} aria-live="polite">
+          Use a plain background (wall or card)
+        </div>
+      )}
+
       {/* Loading state */}
       {isLoading && (
         <div className={styles.stateOverlay} role="status">
