@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import styles from './LandingPage.module.css'
+import { TipsModal } from '../TipsModal'
 
 interface LandingPageProps {
   onStart: () => void
@@ -18,17 +20,17 @@ const steps = [
   {
     number: '1',
     title: 'Choose your background',
-    body: 'Place the object in front of a plain, uniform background — a white wall or sheet of card works best. This is the most important step for a clean result.',
+    body: 'Place the object in front of a plain, uniform background — a white wall or sheet of card works best.',
   },
   {
     number: '2',
     title: 'Position and capture',
-    body: 'Hold your phone parallel to the label. Start at one edge and slowly pan around, tapping the shutter as you go. Overlap each shot by about 30%. Aim for 6–12 photos.',
+    body: 'Keep the phone still and rotate the object. Hold it by the cap so your hands stay above the label. In photo mode, overlap each shot by ~30%.',
   },
   {
     number: '3',
     title: 'Review & process',
-    body: 'Delete any blurry frames, then tap Process. The app stitches the photos into one flat image.',
+    body: 'Delete any blurry frames, then tap Process. The app stitches them into one flat image.',
   },
   {
     number: '4',
@@ -37,9 +39,9 @@ const steps = [
   },
 ]
 
-const tip = 'Tip: a plain wall or white card behind the object makes unwrapping much more accurate.'
-
 export function LandingPage({ onStart }: LandingPageProps) {
+  const [showTips, setShowTips] = useState(false)
+
   return (
     <div className={styles.container}>
       <div className={styles.hero}>
@@ -73,7 +75,9 @@ export function LandingPage({ onStart }: LandingPageProps) {
         ))}
       </ol>
 
-      <p className={styles.tip}>{tip}</p>
+      <button className={styles.tipsButton} onClick={() => setShowTips(true)}>
+        Tips for best results ›
+      </button>
 
       <button className={styles.startButton} onClick={onStart}>
         Get Started
@@ -84,6 +88,8 @@ export function LandingPage({ onStart }: LandingPageProps) {
         <span className={styles.dot}>·</span>
         <span>{BUILD_LABEL}</span>
       </footer>
+
+      {showTips && <TipsModal onClose={() => setShowTips(false)} />}
     </div>
   )
 }
