@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import styles from './ResultView.module.css'
+import { getLastDebugInfo } from '../../lib/stitcher'
+import type { StitchDebugInfo } from '../../workers/stitcher.worker'
 
 interface ResultViewProps {
   resultBlob: Blob
   onReset: () => void
+  devMode?: boolean
 }
 
 interface ToastState {
@@ -21,11 +24,14 @@ const MIN_SCALE = 1
 const MAX_SCALE = 5
 const DOUBLE_TAP_DELAY = 300 // ms
 
-export function ResultView({ resultBlob, onReset }: ResultViewProps) {
+export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewProps) {
   const [objectUrl, setObjectUrl] = useState<string>('')
   const [toast, setToast] = useState<ToastState>({ message: '', visible: false })
   const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null)
   const [transform, setTransform] = useState<Transform>({ scale: 1, x: 0, y: 0 })
+  const [debugInfo] = useState<StitchDebugInfo | null>(() => devMode ? getLastDebugInfo() : null)
+  const [showDebug, setShowDebug] = useState(false)
+  const debugCanvasRef = useRef<HTMLCanvasElement>(null)
 
   // Refs for pan/zoom gesture tracking
   const containerRef = useRef<HTMLDivElement>(null)
@@ -58,6 +64,39 @@ export function ResultView({ resultBlob, onReset }: ResultViewProps) {
       if (toastTimer.current) clearTimeout(toastTimer.current)
     }
   }, [])
+
+  // Draw debug overlay on canvas once image dimensions are known
+  useEffect(() => {
+    if (!devMode || !debugInfo || !dimensions || !debugCanvasRef.current) return
+    const canvas = debugCanvasRef.current
+    canvas.width = dimensions.w
+    canvas.height = dimensions.h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    ctx.clearRect(0, 0, dimensions.w, dimensions.h)
+
+    debugInfo.frames.forEach((f, i) => {
+      if (i === 0) return // no line for first frame
+      const x = f.xPosition
+      // Draw boundary line
+      ctx.strokeStyle = f.nccScore > 0.5 ? '#00ff88' : f.nccScore > 0.2 ? '#ffcc00' : '#ff4444'
+      ctx.lineWidth = Math.max(2, dimensions.w / 600)
+      ctx.setLineDash([8, 4])
+      ctx.beginPath()
+      ctx.moveTo(x, 0)
+      ctx.lineTo(x, dimensions.h)
+      ctx.stroke()
+
+      // Draw label
+      const label = `F${i} | ${f.overlapPct}% | NCC:${f.nccScore.toFixed(2)}`
+      ctx.font = `bold ${Math.max(12, dimensions.h / 40)}px monospace`
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'
+      ctx.fillRect(x + 4, 6, ctx.measureText(label).width + 8, Math.max(18, dimensions.h / 30))
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(label, x + 8, Math.max(20, dimensions.h / 22))
+    })
+  }, [devMode, debugInfo, dimensions])
 
   // --- Actions ---
 
@@ -205,7 +244,12 @@ export function ResultView({ resultBlob, onReset }: ResultViewProps) {
       {/* Info bar */}
       {dimensions && (
         <div className={styles.infoBar} aria-label="Image dimensions">
-          {dimensions.w} &times; {dimensions.h} px
+          <span>{dimensions.w} &times; {dimensions.h} px</span>
+          {devMode && debugInfo && (
+            <button className={styles.debugToggle} onClick={() => setShowDebug(v => !v)}>
+              {showDebug ? 'Hide debug' : 'Debug'}
+            </button>
+          )}
         </div>
       )}
 
@@ -221,16 +265,24 @@ export function ResultView({ resultBlob, onReset }: ResultViewProps) {
         style={{ touchAction: 'none' }}
       >
         {objectUrl && (
-          <img
-            src={objectUrl}
-            alt="Unwrapped label"
-            className={styles.image}
-            style={{
-              transform: `scale(${transform.scale}) translate(${transform.x / transform.scale}px, ${transform.y / transform.scale}px)`,
-            }}
-            onLoad={handleImageLoad}
-            draggable={false}
-          />
+          <div style={{ position: 'relative', display: 'inline-block',
+            transform: `scale(${transform.scale}) translate(${transform.x / transform.scale}px, ${transform.y / transform.scale}px)`,
+            transformOrigin: 'center center' }}>
+            <img
+              src={objectUrl}
+              alt="Unwrapped label"
+              className={styles.image}
+              style={{ transform: 'none' }}
+              onLoad={handleImageLoad}
+              draggable={false}
+            />
+            {devMode && showDebug && (
+              <canvas
+                ref={debugCanvasRef}
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -253,6 +305,31 @@ export function ResultView({ resultBlob, onReset }: ResultViewProps) {
           <span className={styles.actionLabel}>New</span>
         </button>
       </div>
+
+      {/* Debug panel */}
+      {devMode && showDebug && debugInfo && (
+        <div className={styles.debugPanel}>
+          <p className={styles.debugTitle}>Stitch debug — panorama {debugInfo.panoramaWidth}×{debugInfo.frameHeight}px | frames {debugInfo.frameWidth}px wide</p>
+          <table className={styles.debugTable}>
+            <thead>
+              <tr><th>Frame</th><th>X pos</th><th>Overlap</th><th>NCC score</th><th>Quality</th></tr>
+            </thead>
+            <tbody>
+              {debugInfo.frames.map(f => (
+                <tr key={f.frameIndex}>
+                  <td>{f.frameIndex}</td>
+                  <td>{f.xPosition}px</td>
+                  <td>{f.overlapPct}%</td>
+                  <td style={{ color: f.nccScore > 0.5 ? '#00ff88' : f.nccScore > 0.2 ? '#ffcc00' : '#ff4444' }}>
+                    {f.nccScore.toFixed(3)}
+                  </td>
+                  <td>{f.nccScore > 0.5 ? '✓ Good' : f.nccScore > 0.2 ? '⚠ Fair' : '✗ Poor'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Toast */}
       {toast.message && (

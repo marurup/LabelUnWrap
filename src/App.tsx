@@ -96,6 +96,7 @@ function App() {
         return (
           <ResultView
             resultBlob={resultBlob}
+            devMode={devMode}
             onReset={() => {
               setCapturedFrames([])
               setResultBlob(null)

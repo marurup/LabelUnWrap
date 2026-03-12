@@ -9,9 +9,24 @@
 
 type WorkerInput = { type: 'stitch'; frames: ImageData[] }
 
+export interface FrameDebugInfo {
+  frameIndex: number
+  xPosition: number       // pixel offset from left of panorama
+  overlapWithPrev: number // pixels of overlap with previous frame
+  overlapPct: number      // overlap as % of frame width
+  nccScore: number        // NCC score (–1 to 1, higher = better match)
+}
+
+export interface StitchDebugInfo {
+  frameWidth: number
+  frameHeight: number
+  panoramaWidth: number
+  frames: FrameDebugInfo[]
+}
+
 type WorkerOutput =
   | { type: 'progress'; step: string; percent: number }
-  | { type: 'result'; imageData: ImageData }
+  | { type: 'result'; imageData: ImageData; debugInfo: StitchDebugInfo }
   | { type: 'error'; message: string }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +119,7 @@ function ncc(a: Float32Array, b: Float32Array): number {
  * We compare a 20%-wide strip from the right edge of A against the same-width
  * strip from the left edge of B's overlap region.
  */
-function findOffset(frameA: ImageData, frameB: ImageData): number {
+function findOffset(frameA: ImageData, frameB: ImageData): { offset: number; nccScore: number } {
   const fw = frameA.width
   const fh = frameA.height
 
@@ -124,6 +139,7 @@ function findOffset(frameA: ImageData, frameB: ImageData): number {
 
   let bestOffset = fw  // default: no overlap
   let bestScore = -Infinity
+  let bestNcc = 0
 
   function evaluate(overlap: number): number {
     if (overlap < minOverlap || overlap > maxOverlap) return -Infinity
@@ -139,6 +155,7 @@ function findOffset(frameA: ImageData, frameB: ImageData): number {
     const score = evaluate(overlap)
     if (score > bestScore) {
       bestScore = score
+      bestNcc = score
       bestOffset = fw - overlap
     }
   }
@@ -151,11 +168,12 @@ function findOffset(frameA: ImageData, frameB: ImageData): number {
     const score = evaluate(overlap)
     if (score > bestScore) {
       bestScore = score
+      bestNcc = score
       bestOffset = fw - overlap
     }
   }
 
-  return bestOffset
+  return { offset: bestOffset, nccScore: bestNcc }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +292,13 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
 
     // Phase 2: find overlaps — 30%–60%, one update per frame pair
     const xPositions: number[] = [0]
+    const nccScores: number[] = [0]
     for (let i = 1; i < n; i++) {
       const pct = Math.round(30 + ((i - 1) / (n - 1)) * 30)
       post({ type: 'progress', step: `Aligning frame ${i + 1} of ${n}…`, percent: pct })
-      const off = findOffset(corrected[i - 1], corrected[i])
-      xPositions.push(xPositions[i - 1] + off)
+      const { offset, nccScore } = findOffset(corrected[i - 1], corrected[i])
+      xPositions.push(xPositions[i - 1] + offset)
+      nccScores.push(nccScore)
     }
 
     // Phase 3: composite — 60%–85%, one update per frame
@@ -334,8 +354,26 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
     post({ type: 'progress', step: 'Cropping result…', percent: 88 })
     const result = cropToContent(stitched)
 
+    const fw2 = corrected[0].width
+    const debugInfo: StitchDebugInfo = {
+      frameWidth: fw2,
+      frameHeight: corrected[0].height,
+      panoramaWidth: totalW,
+      frames: xPositions.map((xPos, i) => {
+        const prevEnd = i > 0 ? xPositions[i - 1] + fw2 : xPos
+        const overlapPx = Math.max(0, prevEnd - xPos)
+        return {
+          frameIndex: i,
+          xPosition: xPos,
+          overlapWithPrev: overlapPx,
+          overlapPct: Math.round((overlapPx / fw2) * 100),
+          nccScore: Math.round(nccScores[i] * 1000) / 1000,
+        }
+      }),
+    }
+
     post({ type: 'progress', step: 'Done', percent: 100 })
-    self.postMessage({ type: 'result', imageData: result } as WorkerOutput, {
+    self.postMessage({ type: 'result', imageData: result, debugInfo } as WorkerOutput, {
       transfer: [result.data.buffer],
     })
   } catch (err) {

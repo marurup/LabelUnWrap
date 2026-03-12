@@ -11,6 +11,62 @@
   -webkit-user-select: none;
 }
 
+/* ─── Info bar + debug toggle ─────────────────────────────────────────────── */
+
+.debugToggle {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(220, 38, 38, 0.6);
+  background: rgba(220, 38, 38, 0.2);
+  color: #ff8888;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* ─── Debug panel ────────────────────────────────────────────────────────────── */
+
+.debugPanel {
+  background: rgba(0,0,0,0.92);
+  border-top: 1px solid rgba(220,38,38,0.4);
+  padding: 8px 12px;
+  overflow-x: auto;
+  max-height: 40vh;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.debugTitle {
+  font-size: 0.7rem;
+  color: #ff8888;
+  font-family: monospace;
+  margin: 0 0 6px;
+}
+
+.debugTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  font-family: monospace;
+  color: #ccc;
+}
+
+.debugTable th {
+  text-align: left;
+  padding: 2px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.15);
+  color: #888;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.debugTable td {
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+
 /* ─── Pan/zoom viewport ──────────────────────────────────────────────────────── */
 
 .viewport {
@@ -50,7 +106,10 @@
   font-size: 0.75rem;
   font-family: var(--font-mono);
   letter-spacing: 0.04em;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
