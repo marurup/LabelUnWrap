@@ -96,7 +96,7 @@ export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewP
       ctx.fillStyle = '#ffffff'
       ctx.fillText(label, x + 8, Math.max(20, dimensions.h / 22))
     })
-  }, [devMode, debugInfo, dimensions])
+  }, [devMode, debugInfo, dimensions, showDebug])
 
   // --- Actions ---
 
