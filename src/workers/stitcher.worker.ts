@@ -4,13 +4,15 @@
  * Panorama stitching for cylindrical label unwrapping.
  *
  * Key design decisions:
- * - Overlap detection uses downsampled full-frame thumbnails with a cosine
- *   horizontal weight. This makes the bottle (centre of frame) dominate the
- *   NCC comparison and suppresses the static background (frame edges).
- * - No barrel correction — it creates transparent edge artefacts and makes
- *   the matching harder without meaningful quality benefit for phone cameras.
- * - Compositing uses a per-pixel cosine centre-weight so background pixels at
- *   the frame edges contribute less to the final blend.
+ * - Background colour is sampled from the corners of the first frame and used
+ *   throughout: background pixels are zeroed in NCC thumbnails so only label
+ *   features drive overlap detection, and the same colour is used to crop the
+ *   final panorama.
+ * - Overlap detection uses downsampled thumbnails with cosine horizontal
+ *   weighting (centre columns weighted ≈1, edges ≈0) on top of background
+ *   subtraction.
+ * - Compositing uses a Voronoi centre-strip approach with per-pixel cylindrical
+ *   y-correction to remove vertical foreshortening.
  */
 
 type WorkerInput = { type: 'stitch'; frames: ImageData[] }
@@ -34,6 +36,12 @@ type WorkerOutput =
   | { type: 'progress'; step: string; percent: number }
   | { type: 'result'; imageData: ImageData; debugInfo: StitchDebugInfo }
   | { type: 'error'; message: string }
+
+type BgColor = [number, number, number]
+
+// Colour distance (squared) threshold for background classification.
+// 40 units of Euclidean RGB distance → 1600 squared.
+const BG_THRESH_SQ = 40 * 40
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,13 +67,48 @@ function ncc(a: Float32Array, b: Float32Array): number {
 }
 
 /**
- * Downsample an ImageData to a grayscale Float32Array of size tw×th,
- * then multiply each column by a cosine horizontal weight so that the
- * centre columns (where the bottle lives) have weight ≈1 and the edge
- * columns (background) have weight ≈0.
+ * Sample the background colour from the four corners of a frame.
+ * Corners are sampled because the label never reaches the very edges.
  */
-function buildWeightedThumb(img: ImageData, tw: number, th: number): Float32Array {
+function sampleBackground(frame: ImageData): BgColor {
+  const { width, height, data } = frame
+  const PATCH = 12
+  let r = 0, g = 0, b = 0, n = 0
+  const origins = [
+    [0, 0],
+    [width - PATCH, 0],
+    [0, height - PATCH],
+    [width - PATCH, height - PATCH],
+  ]
+  for (const [sx, sy] of origins) {
+    for (let dy = 0; dy < PATCH; dy++) {
+      for (let dx = 0; dx < PATCH; dx++) {
+        const i = (clamp(sy + dy, 0, height - 1) * width + clamp(sx + dx, 0, width - 1)) * 4
+        r += data[i]; g += data[i + 1]; b += data[i + 2]
+        n++
+      }
+    }
+  }
+  return [r / n, g / n, b / n]
+}
+
+/**
+ * Downsample an ImageData to a grayscale Float32Array of size tw×th.
+ *
+ * Two layers of background suppression:
+ *   1. Background subtraction: pixels within BG_THRESH_SQ of the background
+ *      colour contribute 0 — only label pixels drive the NCC.
+ *   2. Cosine horizontal weight: centre columns weight ≈1, edges ≈0, so any
+ *      residual background at the frame edges is de-emphasised.
+ */
+function buildWeightedThumb(
+  img: ImageData,
+  tw: number,
+  th: number,
+  bg: BgColor,
+): Float32Array {
   const { width, height, data } = img
+  const [bgR, bgG, bgB] = bg
   const out = new Float32Array(tw * th)
 
   for (let ty = 0; ty < th; ty++) {
@@ -76,18 +119,23 @@ function buildWeightedThumb(img: ImageData, tw: number, th: number): Float32Arra
       const x0 = Math.floor((tx / tw) * width)
       const x1 = Math.floor(((tx + 1) / tw) * width)
 
-      let sum = 0, cnt = 0
+      let sum = 0, fgCnt = 0
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
           const i = (y * width + x) * 4
-          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-          cnt++
+          const dr = data[i]     - bgR
+          const dg = data[i + 1] - bgG
+          const db = data[i + 2] - bgB
+          if (dr * dr + dg * dg + db * db >= BG_THRESH_SQ) {
+            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+            fgCnt++
+          }
         }
       }
 
       // Cosine centre-weight: 0 at edges, 1 at centre
       const w = 0.5 - 0.5 * Math.cos(Math.PI * tx / (tw - 1))
-      out[ty * tw + tx] = (cnt > 0 ? sum / cnt : 0) * w
+      out[ty * tw + tx] = (fgCnt > 0 ? sum / fgCnt : 0) * w
     }
   }
   return out
@@ -99,18 +147,22 @@ function buildWeightedThumb(img: ImageData, tw: number, th: number): Float32Arra
 
 /**
  * Find the horizontal offset between two adjacent frames using NCC on
- * downsampled, centre-weighted thumbnails.
+ * background-subtracted, centre-weighted thumbnails.
  *
  * "offset" = how far right frameB starts relative to frameA's left edge.
  * overlap  = frameWidth − offset.
  */
-function findOffset(frameA: ImageData, frameB: ImageData): { offset: number; nccScore: number } {
+function findOffset(
+  frameA: ImageData,
+  frameB: ImageData,
+  bg: BgColor,
+): { offset: number; nccScore: number } {
   const fw = frameA.width
 
   // Thumbnail: 96 columns × 54 rows preserves 16:9 structure and is fast
   const TW = 96, TH = 54
-  const tA = buildWeightedThumb(frameA, TW, TH)
-  const tB = buildWeightedThumb(frameB, TW, TH)
+  const tA = buildWeightedThumb(frameA, TW, TH, bg)
+  const tB = buildWeightedThumb(frameB, TW, TH, bg)
 
   // Search overlap from 10% to 80% of frame width
   const minOvlp = Math.round(TW * 0.10)
@@ -120,7 +172,6 @@ function findOffset(frameA: ImageData, frameB: ImageData): { offset: number; ncc
   let bestScore = -Infinity
 
   for (let ovlp = minOvlp; ovlp <= maxOvlp; ovlp++) {
-    // Extract the right `ovlp` columns of tA and left `ovlp` columns of tB
     const rA = new Float32Array(ovlp * TH)
     const rB = new Float32Array(ovlp * TH)
     for (let y = 0; y < TH; y++) {
@@ -151,8 +202,7 @@ function findOffset(frameA: ImageData, frameB: ImageData): { offset: number; ncc
  *   2. Compute the viewing angle: θ = atan((src_x − cx) / f)
  *   3. Apply cylindrical y-correction: src_y = cy + (oy − cy) / cos(θ)
  *      This removes the vertical foreshortening that makes horizontal
- *      label features (like the yellow line) appear to curve up/down at
- *      the edges of the cylinder.
+ *      label features appear to curve up/down at the cylinder edges.
  *   4. Bilinear-sample from the source frame.
  *
  * Focal length f is estimated assuming 60° horizontal FOV (typical portrait
@@ -167,11 +217,8 @@ function composite(frames: ImageData[], xPositions: number[]): ImageData {
   const fh = frames[0].height
   const cx = fw / 2
   const cy = fh / 2
-  // Focal length in pixels for the given FOV
   const f = fw / (2 * Math.tan(FOV_RAD / 2))
 
-  // Determine each frame's ownership zone in panorama coordinates
-  // (midpoint between adjacent frame centres)
   const leftBound: number[] = []
   const rightBound: number[] = []
   for (let i = 0; i < n; i++) {
@@ -193,16 +240,13 @@ function composite(frames: ImageData[], xPositions: number[]): ImageData {
 
     for (let oy = 0; oy < fh; oy++) {
       for (let gx = lx; gx < rx; gx++) {
-        // Source x in frame i's local coordinates
         const srcX = (gx + panoOrigin) - xPositions[i]
         if (srcX < 0 || srcX >= fw - 1) continue
 
-        // Cylindrical y-correction
         const theta = Math.atan((srcX - cx) / f)
         const srcY = cy + (oy - cy) / Math.cos(theta)
         if (srcY < 0 || srcY >= fh - 1) continue
 
-        // Bilinear interpolation
         const x0 = Math.floor(srcX), x1 = x0 + 1
         const y0 = Math.floor(srcY), y1 = y0 + 1
         const fx = srcX - x0, fy = srcY - y0
@@ -226,6 +270,7 @@ function composite(frames: ImageData[], xPositions: number[]): ImageData {
 // Crop
 // ---------------------------------------------------------------------------
 
+/** Crop to non-transparent pixels (removes gaps left by cylindrical warp). */
 function cropToContent(img: ImageData): ImageData {
   const { width, height, data } = img
   let minX = width, maxX = 0, minY = height, maxY = 0
@@ -257,44 +302,15 @@ function cropToContent(img: ImageData): ImageData {
  * Crop the panorama to the rows that contain the object, removing the
  * uniform background above and below.
  *
- * Strategy: sample the four corners of the image to estimate the background
- * colour. Then scan rows from top and bottom, discarding any row where most
- * pixels are within BG_THRESH of the background colour. This works for any
- * label colour as long as the background is plain (a wall, card, etc.).
+ * Uses the pre-sampled background colour (from the source frame corners)
+ * rather than sampling the panorama corners, which are black/transparent.
  */
-function cropBackground(img: ImageData): ImageData {
+function cropBackground(img: ImageData, bg: BgColor): ImageData {
   const { width, height, data } = img
+  const [bgR, bgG, bgB] = bg
 
-  // Sample background colour from a small patch at each corner
-  function sampleCorner(startX: number, startY: number): [number, number, number] {
-    const PATCH = 5
-    let r = 0, g = 0, b = 0, n = 0
-    for (let dy = 0; dy < PATCH; dy++) {
-      for (let dx = 0; dx < PATCH; dx++) {
-        const x = clamp(startX + dx, 0, width - 1)
-        const y = clamp(startY + dy, 0, height - 1)
-        const i = (y * width + x) * 4
-        r += data[i]; g += data[i + 1]; b += data[i + 2]
-        n++
-      }
-    }
-    return [r / n, g / n, b / n]
-  }
-
-  const corners = [
-    sampleCorner(0, 0),
-    sampleCorner(width - 5, 0),
-    sampleCorner(0, height - 5),
-    sampleCorner(width - 5, height - 5),
-  ]
-  const bgR = corners.reduce((s, c) => s + c[0], 0) / 4
-  const bgG = corners.reduce((s, c) => s + c[1], 0) / 4
-  const bgB = corners.reduce((s, c) => s + c[2], 0) / 4
-
-  // A row is "background" if most of its pixels are close to the bg colour
-  const BG_THRESH = 40       // colour distance to count as "background pixel"
-  const BG_ROW_FRAC = 0.75   // fraction of pixels that must match bg for the row to be bg
-
+  // A row is "background" if ≥75% of its pixels match the bg colour
+  const BG_ROW_FRAC = 0.75
   function isBackgroundRow(y: number): boolean {
     let bgCount = 0
     for (let x = 0; x < width; x++) {
@@ -302,23 +318,20 @@ function cropBackground(img: ImageData): ImageData {
       const dr = data[i]     - bgR
       const dg = data[i + 1] - bgG
       const db = data[i + 2] - bgB
-      if (Math.sqrt(dr * dr + dg * dg + db * db) < BG_THRESH) bgCount++
+      if (dr * dr + dg * dg + db * db < BG_THRESH_SQ) bgCount++
     }
     return bgCount / width >= BG_ROW_FRAC
   }
 
   let y0 = 0
   while (y0 < height && isBackgroundRow(y0)) y0++
-
   let y1 = height - 1
   while (y1 > y0 && isBackgroundRow(y1)) y1--
 
-  // If we stripped less than 5% of height, the background wasn't uniform enough
-  // to detect — return original to avoid false crops
+  // If we couldn't strip at least 5% — background wasn't detectable, return as-is
   if (y0 === 0 && y1 === height - 1) return img
   if (y1 - y0 < height * 0.1) return img
 
-  // Small margin so we don't clip the very edge of the label
   const margin = Math.round(height * 0.01)
   y0 = Math.max(0, y0 - margin)
   y1 = Math.min(height - 1, y1 + margin)
@@ -326,8 +339,7 @@ function cropBackground(img: ImageData): ImageData {
 
   const out = new ImageData(width, nh)
   for (let y = 0; y < nh; y++) {
-    const si = (y0 + y) * width * 4
-    out.data.set(data.subarray(si, si + width * 4), y * width * 4)
+    out.data.set(data.subarray((y0 + y) * width * 4, (y0 + y + 1) * width * 4), y * width * 4)
   }
   return out
 }
@@ -353,13 +365,18 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
     const n = frames.length
     const post = (o: WorkerOutput) => self.postMessage(o)
 
+    // Sample background colour once from the first frame's corners.
+    // All subsequent steps (NCC and crop) use this same colour.
+    post({ type: 'progress', step: 'Detecting background…', percent: 28 })
+    const bg = sampleBackground(frames[0])
+
     // Phase 1: find overlaps (30%–70%)
     const xPositions: number[] = [0]
     const nccScores: number[] = [0]
     for (let i = 1; i < n; i++) {
       const pct = Math.round(30 + ((i - 1) / (n - 1)) * 40)
       post({ type: 'progress', step: `Aligning frame ${i + 1} of ${n}…`, percent: pct })
-      const { offset, nccScore } = findOffset(frames[i - 1], frames[i])
+      const { offset, nccScore } = findOffset(frames[i - 1], frames[i], bg)
       xPositions.push(xPositions[i - 1] + offset)
       nccScores.push(nccScore)
     }
@@ -373,7 +390,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
 
     post({ type: 'progress', step: 'Cropping…', percent: 90 })
     const cropped = cropToContent(stitched)
-    const result = cropBackground(cropped)
+    const result = cropBackground(cropped, bg)
 
     const fw = frames[0].width
     const debugInfo: StitchDebugInfo = {
