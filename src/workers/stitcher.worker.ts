@@ -41,8 +41,12 @@ type WorkerOutput =
 type BgColor = [number, number, number]
 
 // Colour distance (squared) threshold for background classification.
-// 40 units of Euclidean RGB distance → 1600 squared.
-const BG_THRESH_SQ = 40 * 40
+// 50 units of Euclidean RGB distance — raised from 40 to eliminate cloth-texture false positives.
+const BG_THRESH_SQ = 50 * 50
+
+// Small prior added to NCC score that increases with overlap width.
+// Encodes that objects don't usually jump 80% of frame width between frames.
+const OVERLAP_PRIOR = 0.10
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -137,10 +141,15 @@ function buildThumb(
   return out
 }
 
-/** Returns which thumbnail columns contain any foreground pixel. */
+/**
+ * Returns which thumbnail columns contain any foreground pixel.
+ * Only considers the top 75% of rows — the bottom quarter often
+ * contains hands holding the object, which creates false foreground.
+ */
 function buildColMask(thumb: Float32Array, tw: number, th: number): Uint8Array {
   const mask = new Uint8Array(tw)
-  for (let ty = 0; ty < th; ty++)
+  const maxRow = Math.floor(th * 0.75)
+  for (let ty = 0; ty < maxRow; ty++)
     for (let tx = 0; tx < tw; tx++)
       if (thumb[ty * tw + tx] > 0) mask[tx] = 1
   return mask
@@ -186,8 +195,8 @@ function findOffset(
   const maskA = buildColMask(tA, TW, TH)
   const maskB = buildColMask(tB, TW, TH)
 
-  const minOvlp = Math.round(TW * 0.10)
-  const maxOvlp = Math.round(TW * 0.80)
+  const minOvlp = Math.round(TW * 0.05)
+  const maxOvlp = Math.round(TW * 0.92)
 
   let bestOvlp = -1
   let bestScore = -Infinity
@@ -206,7 +215,7 @@ function findOffset(
         rA[y * ovlp + x] = tA[y * TW + (TW - ovlp + x)]
         rB[y * ovlp + x] = tB[y * TW + x]
       }
-    const s = ncc(rA, rB)
+    const s = ncc(rA, rB) + OVERLAP_PRIOR * (ovlp / TW)
     if (s > bestScore) { bestScore = s; bestOvlp = ovlp }
   }
 
