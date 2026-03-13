@@ -8,9 +8,10 @@
  *   throughout: background pixels are zeroed in NCC thumbnails so only label
  *   features drive overlap detection, and the same colour is used to crop the
  *   final panorama.
- * - Overlap detection uses downsampled thumbnails with cosine horizontal
- *   weighting (centre columns weighted ≈1, edges ≈0) on top of background
- *   subtraction.
+ * - Overlap detection uses background-subtracted thumbnails. No cosine
+ *   weighting — the label is not always centred, and cosine de-emphasises
+ *   off-centre content. Instead, a foreground column mask ensures NCC only
+ *   runs at overlap values where label pixels are present in both strips.
  * - Compositing uses a Voronoi centre-strip approach with per-pixel cylindrical
  *   y-correction to remove vertical foreshortening.
  */
@@ -93,15 +94,13 @@ function sampleBackground(frame: ImageData): BgColor {
 }
 
 /**
- * Downsample an ImageData to a grayscale Float32Array of size tw×th.
+ * Downsample an ImageData to a background-subtracted grayscale Float32Array.
  *
- * Two layers of background suppression:
- *   1. Background subtraction: pixels within BG_THRESH_SQ of the background
- *      colour contribute 0 — only label pixels drive the NCC.
- *   2. Cosine horizontal weight: centre columns weight ≈1, edges ≈0, so any
- *      residual background at the frame edges is de-emphasised.
+ * Pixels within BG_THRESH_SQ of the background colour are set to 0.
+ * Only label pixels contribute — no cosine weighting, because the label
+ * is not always centred and cosine de-emphasises off-centre content.
  */
-function buildWeightedThumb(
+function buildThumb(
   img: ImageData,
   tw: number,
   th: number,
@@ -132,13 +131,26 @@ function buildWeightedThumb(
           }
         }
       }
-
-      // Cosine centre-weight: 0 at edges, 1 at centre
-      const w = 0.5 - 0.5 * Math.cos(Math.PI * tx / (tw - 1))
-      out[ty * tw + tx] = (fgCnt > 0 ? sum / fgCnt : 0) * w
+      out[ty * tw + tx] = fgCnt > 0 ? sum / fgCnt : 0
     }
   }
   return out
+}
+
+/** Returns which thumbnail columns contain any foreground pixel. */
+function buildColMask(thumb: Float32Array, tw: number, th: number): Uint8Array {
+  const mask = new Uint8Array(tw)
+  for (let ty = 0; ty < th; ty++)
+    for (let tx = 0; tx < tw; tx++)
+      if (thumb[ty * tw + tx] > 0) mask[tx] = 1
+  return mask
+}
+
+/** Horizontal centroid of the foreground columns (for fallback). */
+function colCentroid(mask: Uint8Array, tw: number): number {
+  let xSum = 0, n = 0
+  for (let x = 0; x < tw; x++) if (mask[x]) { xSum += x; n++ }
+  return n > 0 ? xSum / n : tw / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +158,17 @@ function buildWeightedThumb(
 // ---------------------------------------------------------------------------
 
 /**
- * Find the horizontal offset between two adjacent frames using NCC on
- * background-subtracted, centre-weighted thumbnails.
+ * Find the horizontal offset between two adjacent frames.
+ *
+ * Strategy:
+ *   1. Build background-subtracted thumbnails (label pixels only, no cosine).
+ *   2. For each candidate overlap, check how many columns have foreground
+ *      content in BOTH the right-strip of A and left-strip of B.
+ *      Skip candidates with fewer than 3 matching foreground columns —
+ *      there's no label signal to correlate.
+ *   3. Run NCC only on candidates that passed step 2.
+ *   4. If no candidate passed (frames share no visible label content),
+ *      fall back to the centroid difference as a rough estimate.
  *
  * "offset" = how far right frameB starts relative to frameA's left edge.
  * overlap  = frameWidth − offset.
@@ -158,33 +179,45 @@ function findOffset(
   bg: BgColor,
 ): { offset: number; nccScore: number } {
   const fw = frameA.width
-
-  // Thumbnail: 96 columns × 54 rows preserves 16:9 structure and is fast
   const TW = 96, TH = 54
-  const tA = buildWeightedThumb(frameA, TW, TH, bg)
-  const tB = buildWeightedThumb(frameB, TW, TH, bg)
 
-  // Search overlap from 10% to 80% of frame width
+  const tA = buildThumb(frameA, TW, TH, bg)
+  const tB = buildThumb(frameB, TW, TH, bg)
+  const maskA = buildColMask(tA, TW, TH)
+  const maskB = buildColMask(tB, TW, TH)
+
   const minOvlp = Math.round(TW * 0.10)
   const maxOvlp = Math.round(TW * 0.80)
 
-  let bestOvlp = minOvlp
+  let bestOvlp = -1
   let bestScore = -Infinity
 
   for (let ovlp = minOvlp; ovlp <= maxOvlp; ovlp++) {
+    // How many columns in this overlap window have label pixels in BOTH frames?
+    let fgCols = 0
+    for (let x = 0; x < ovlp; x++)
+      if (maskA[TW - ovlp + x] && maskB[x]) fgCols++
+    if (fgCols < 3) continue  // no usable label signal at this overlap
+
     const rA = new Float32Array(ovlp * TH)
     const rB = new Float32Array(ovlp * TH)
-    for (let y = 0; y < TH; y++) {
+    for (let y = 0; y < TH; y++)
       for (let x = 0; x < ovlp; x++) {
         rA[y * ovlp + x] = tA[y * TW + (TW - ovlp + x)]
         rB[y * ovlp + x] = tB[y * TW + x]
       }
-    }
     const s = ncc(rA, rB)
     if (s > bestScore) { bestScore = s; bestOvlp = ovlp }
   }
 
-  // Scale back to full frame pixels
+  if (bestOvlp === -1) {
+    // Fallback: estimate offset from how far the label centroid shifted
+    const cA = colCentroid(maskA, TW)
+    const cB = colCentroid(maskB, TW)
+    const offset = Math.max(0, Math.round(((cA - cB) / TW) * fw))
+    return { offset, nccScore: 0 }
+  }
+
   const offset = Math.round(((TW - bestOvlp) / TW) * fw)
   return { offset, nccScore: Math.round(bestScore * 1000) / 1000 }
 }
