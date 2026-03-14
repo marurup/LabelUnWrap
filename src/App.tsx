@@ -14,7 +14,7 @@ export type AppState = 'landing' | 'capture' | 'review' | 'processing' | 'result
 
 const STATE_ORDER: AppState[] = ['capture', 'review', 'processing', 'result']
 
-const VIDEO_FRAME_TARGET = 12
+const VIDEO_FRAME_TARGET = 60
 
 function App() {
   const devMode = useDevMode()

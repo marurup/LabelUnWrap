@@ -1,26 +1,29 @@
 /**
- * stitcher.worker.ts
+ * stitcher.worker.ts — slit-scan label unwrapper.
  *
- * Panorama stitching for cylindrical label unwrapping.
+ * How it works
+ * ─────────────
+ * The camera is held still while the can rotates.  The centre column of each
+ * frame therefore shows a different strip of the label as it sweeps past.
+ * We concatenate those centre strips in time order to build a flat panorama.
  *
- * Key design decisions:
- * - Background colour is sampled from the first-frame corners and used
- *   throughout: background pixels are excluded from feature computation.
- * - Alignment uses FULL-RESOLUTION 1-D column gradient profiles rather than
- *   a downsampled thumbnail with 2-D strip NCC.
- *   Why: 2-D strip NCC assumes the overlap region looks the same in both frames,
- *   but cylindrical perspective distortion makes the same feature appear
- *   compressed at the edge of one frame and full-size near the centre of the
- *   next.  The 1-D approach sums the gradient profile per column; column
- *   *position* is unaffected by cylindrical foreshortening.
- * - 1-D cross-correlation is computed at full frame width, giving precise
- *   sub-pixel-class accuracy without any rescaling bias.
- * - No global scroll-direction assumption: the sign of the cross-correlation
- *   shift is the direction, determined independently per pair.
- * - Frames are sorted by detected panorama position before compositing so
- *   the result is correct regardless of rotation direction.
- * - Compositing uses a Voronoi centre-strip approach with per-pixel
- *   cylindrical y-correction to remove foreshortening.
+ * Horizontal jitter compensation
+ * ───────────────────────────────
+ * Camera shake shifts the can left/right in the frame.  We detect the can's
+ * horizontal centre each frame (midpoint of non-background columns) and
+ * always sample relative to that centre, so jitter is automatically cancelled.
+ *
+ * Strip width
+ * ────────────
+ * Cross-correlating the gradient profiles centred on the can centre gives the
+ * apparent rotation Δpx between consecutive frames.  We use |Δpx| columns
+ * from the centre of each frame so the output is geometrically proportional
+ * to the rotation — no stretching, no compression.
+ *
+ * Vertical alignment
+ * ───────────────────
+ * For each frame we find the vertical centre of the can at its centre column
+ * and shift the strip so the can centre is always at the same output row.
  */
 
 type WorkerInput = { type: 'stitch'; frames: ImageData[] }
@@ -47,8 +50,13 @@ type WorkerOutput =
 
 type BgColor = [number, number, number]
 
-// Colour distance² threshold for background classification.
-const BG_THRESH_SQ = 50 * 50
+const BG_THRESH_SQ  = 50 * 50
+// Maximum strip width taken from a single frame.  Limits distortion at can edges.
+const MAX_STRIP     = 80
+// Minimum rotation (px) needed to include a frame.  Skips near-stationary frames.
+const MIN_ROTATION  = 2
+// Half-width of the centred profile window used for rotation detection.
+const PROFILE_HW    = 300
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,10 +66,6 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v
 }
 
-/**
- * Sample the background colour from four 12×12 corner patches.
- * Corners are always background because the label never fills the frame edge.
- */
 function sampleBackground(frame: ImageData): BgColor {
   const { width, height, data } = frame
   const PATCH = 12
@@ -74,8 +78,7 @@ function sampleBackground(frame: ImageData): BgColor {
     for (let dy = 0; dy < PATCH; dy++) {
       for (let dx = 0; dx < PATCH; dx++) {
         const i = (clamp(sy + dy, 0, height - 1) * width + clamp(sx + dx, 0, width - 1)) * 4
-        r += data[i]; g += data[i + 1]; b += data[i + 2]
-        n++
+        r += data[i]; g += data[i + 1]; b += data[i + 2]; n++
       }
     }
   }
@@ -83,42 +86,31 @@ function sampleBackground(frame: ImageData): BgColor {
 }
 
 // ---------------------------------------------------------------------------
-// 1-D column gradient profile
+// Per-column profiles
 // ---------------------------------------------------------------------------
 
+
 /**
- * Compute a per-column feature profile for horizontal cross-correlation.
- *
- * For each column x, sums |∂lum/∂x| over non-background pixels in the
- * middle 60% of rows (15%–75%), then divides by the count.  The row range
- * avoids hands typically visible at the bottom of the frame.
- *
- * The horizontal gradient fires at vertical feature edges (text, logos, colour
- * boundaries) and is near zero on flat colour regions.  Summing vertically
- * collapses the 2-D image into a 1-D fingerprint of where those edges are.
- * Two frames taken of the same cylinder at slightly different rotation will
- * have the same fingerprint shifted by the rotation amount.
+ * Gradient profile: mean |∂lum/∂x| per column for non-background pixels
+ * in the middle 60% of rows.  Used for rotation detection.
  */
-function columnProfile(img: ImageData, bg: BgColor): Float32Array {
+function gradientProfile(img: ImageData, bg: BgColor): Float32Array {
   const { width, height, data } = img
   const [bgR, bgG, bgB] = bg
   const yStart = Math.floor(height * 0.15)
   const yEnd   = Math.floor(height * 0.75)
   const prof = new Float32Array(width)
-
   for (let x = 1; x < width - 1; x++) {
     let sum = 0, cnt = 0
     for (let y = yStart; y < yEnd; y++) {
       const i  = (y * width + x) * 4
       const dr = data[i] - bgR, dg = data[i + 1] - bgG, db = data[i + 2] - bgB
-      if (dr * dr + dg * dg + db * db < BG_THRESH_SQ) continue  // skip background
-
+      if (dr * dr + dg * dg + db * db < BG_THRESH_SQ) continue
       const il = (y * width + x - 1) * 4
       const ir = (y * width + x + 1) * 4
-      const lumL = 0.299 * data[il] + 0.587 * data[il + 1] + 0.114 * data[il + 2]
-      const lumR = 0.299 * data[ir] + 0.587 * data[ir + 1] + 0.114 * data[ir + 2]
-      sum += Math.abs(lumR - lumL)
-      cnt++
+      const lL = 0.299 * data[il] + 0.587 * data[il + 1] + 0.114 * data[il + 2]
+      const lR = 0.299 * data[ir] + 0.587 * data[ir + 1] + 0.114 * data[ir + 2]
+      sum += Math.abs(lR - lL); cnt++
     }
     prof[x] = cnt > 0 ? sum / cnt : 0
   }
@@ -126,41 +118,106 @@ function columnProfile(img: ImageData, bg: BgColor): Float32Array {
 }
 
 // ---------------------------------------------------------------------------
-// 1-D NCC cross-correlation
+// Can geometry per frame
+// ---------------------------------------------------------------------------
+
+interface CanGeometry {
+  /** Centre column of the can (rotation axis projected onto image plane). */
+  cx: number
+  /** Leftmost non-background column. */
+  left: number
+  /** Rightmost non-background column. */
+  right: number
+  /** Vertical centre row of can content at the centre column. */
+  cy: number
+}
+
+function detectCanGeometry(img: ImageData, bg: BgColor, grad: Float32Array): CanGeometry {
+  const { width, height, data } = img
+  const [bgR, bgG, bgB] = bg
+
+  // Horizontal: find can edges using gradient profile.
+  // Background regions (floor, wall) have low gradient; the can label has high gradient.
+  // Use 8% of the peak as the edge threshold.
+  let maxG = 0
+  for (let x = 0; x < width; x++) if (grad[x] > maxG) maxG = grad[x]
+  const edgeThresh = maxG * 0.08
+
+  let left = Math.floor(width * 0.05)
+  let right = Math.ceil(width * 0.95)
+  for (let x = 0; x < width; x++) { if (grad[x] >= edgeThresh) { left = x; break } }
+  for (let x = width - 1; x >= 0; x--) { if (grad[x] >= edgeThresh) { right = x; break } }
+  const cx = Math.round((left + right) / 2)
+
+  // Vertical: find topmost and bottommost non-background rows at cx
+  let top = 0, bottom = height - 1
+  for (let y = 0; y < height; y++) {
+    const i = (y * width + cx) * 4
+    const dr = data[i] - bgR, dg = data[i + 1] - bgG, db = data[i + 2] - bgB
+    if (dr * dr + dg * dg + db * db >= BG_THRESH_SQ) { top = y; break }
+  }
+  for (let y = height - 1; y >= 0; y--) {
+    const i = (y * width + cx) * 4
+    const dr = data[i] - bgR, dg = data[i + 1] - bgG, db = data[i + 2] - bgB
+    if (dr * dr + dg * dg + db * db >= BG_THRESH_SQ) { bottom = y; break }
+  }
+  const cy = Math.round((top + bottom) / 2)
+
+  return { cx, left, right, cy }
+}
+
+// ---------------------------------------------------------------------------
+// Rotation detection
 // ---------------------------------------------------------------------------
 
 /**
- * Find the shift S that maximises NCC(profA[x], profB[x+S]).
+ * Detect the apparent pixel rotation of the can between two frames.
  *
- * Interpretation:
- *   S > 0 → profB's features are at higher x than profA → label scrolled right
- *   S < 0 → profB's features are at lower  x than profA → label scrolled left
+ * We extract windows of the gradient profile centred on each frame's can
+ * centre, then cross-correlate.  Because we align to the can centre,
+ * horizontal camera jitter is already cancelled.
  *
- * The signed pixel offset for placing frame B relative to frame A = −S.
+ * Returns the signed shift (positive = can moved right = label scrolled right).
  */
-function crossCorrelate1D(
-  profA: Float32Array,
-  profB: Float32Array,
-  maxShift: number,
+function detectRotation(
+  profA: Float32Array, cxA: number,
+  profB: Float32Array, cxB: number,
+  fw: number,
 ): { shift: number; score: number } {
-  const n = profA.length
+  const hw = Math.min(
+    PROFILE_HW,
+    cxA, fw - 1 - cxA,
+    cxB, fw - 1 - cxB,
+  )
+  if (hw < 20) return { shift: 0, score: 0 }
+
+  // Extract centred windows
+  const wA = new Float32Array(2 * hw + 1)
+  const wB = new Float32Array(2 * hw + 1)
+  for (let d = -hw; d <= hw; d++) {
+    wA[d + hw] = profA[cxA + d]
+    wB[d + hw] = profB[cxB + d]
+  }
+
+  // 1-D NCC across all shifts up to hw/2
+  const maxShift = Math.round(hw * 0.8)
+  const n = wA.length
   let bestShift = 0, bestScore = -Infinity
 
   for (let shift = -maxShift; shift <= maxShift; shift++) {
     let mA = 0, mB = 0, cnt = 0
-    for (let x = 0; x < n; x++) {
-      const xB = x + shift
-      if (xB < 0 || xB >= n) continue
-      mA += profA[x]; mB += profB[xB]; cnt++
+    for (let i = 0; i < n; i++) {
+      const j = i + shift
+      if (j < 0 || j >= n) continue
+      mA += wA[i]; mB += wB[j]; cnt++
     }
-    if (cnt < 100) continue
+    if (cnt < 10) continue
     mA /= cnt; mB /= cnt
-
     let num = 0, dA = 0, dB = 0
-    for (let x = 0; x < n; x++) {
-      const xB = x + shift
-      if (xB < 0 || xB >= n) continue
-      const da = profA[x] - mA, db = profB[xB] - mB
+    for (let i = 0; i < n; i++) {
+      const j = i + shift
+      if (j < 0 || j >= n) continue
+      const da = wA[i] - mA, db = wB[j] - mB
       num += da * db; dA += da * da; dB += db * db
     }
     const den = Math.sqrt(dA * dB)
@@ -170,164 +227,61 @@ function crossCorrelate1D(
   return { shift: bestShift, score: bestScore }
 }
 
-/**
- * Find the signed pixel offset for placing frame B relative to frame A.
- * Uses pre-computed column profiles.
- */
-function findOffset(
-  profA: Float32Array,
-  profB: Float32Array,
-  fw: number,
-): { offset: number; nccScore: number } {
-  const maxShift = Math.round(fw * 0.80)
-  const { shift, score } = crossCorrelate1D(profA, profB, maxShift)
-  return {
-    offset: -shift,
-    nccScore: Math.round(score * 1000) / 1000,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Compositing — cylindrical centre-strip projection
-// ---------------------------------------------------------------------------
-
-const FOV_DEG = 60
-const FOV_RAD = (FOV_DEG * Math.PI) / 180
-
-/**
- * Composite sorted frames into a flat panorama.
- * Frames must be sorted by ascending xPosition.
- *
- * Each output pixel is owned by the frame whose centre is closest horizontally
- * (Voronoi partition).  For each owned pixel we un-project through the
- * cylindrical model: a column srcX maps to angle θ = atan((srcX−cx)/f), and
- * the source y is corrected by 1/cos(θ) to compensate for foreshortening.
- */
-function composite(
-  frames: ImageData[],
-  xPositions: number[],
-): ImageData {
-  const n = frames.length
-  const fw = frames[0].width
-  const fh = frames[0].height
-  const cx = fw / 2
-  const cy = fh / 2
-  const f  = fw / (2 * Math.tan(FOV_RAD / 2))
-
-  // Voronoi ownership boundaries between consecutive frames
-  const leftBound: number[] = []
-  const rightBound: number[] = []
-  for (let i = 0; i < n; i++) {
-    leftBound.push(i === 0
-      ? xPositions[0]
-      : (xPositions[i] + xPositions[i - 1]) / 2)
-    rightBound.push(i === n - 1
-      ? xPositions[n - 1] + fw
-      : (xPositions[i] + xPositions[i + 1]) / 2)
-  }
-
-  const totalW = Math.round(rightBound[n - 1] - leftBound[0])
-  const panoOrigin = leftBound[0]
-  const out = new ImageData(totalW, fh)
-
-  for (let i = 0; i < n; i++) {
-    const lx = Math.round(leftBound[i]  - panoOrigin)
-    const rx = Math.round(rightBound[i] - panoOrigin)
-
-    for (let oy = 0; oy < fh; oy++) {
-      for (let gx = lx; gx < rx; gx++) {
-        const srcX = (gx + panoOrigin) - xPositions[i]
-        if (srcX < 0 || srcX >= fw - 1) continue
-
-        // Cylindrical y-correction: un-project the pixel through the lens model
-        const theta = Math.atan((srcX - cx) / f)
-        const srcY  = cy + (oy - cy) / Math.cos(theta)
-        if (srcY < 0 || srcY >= fh - 1) continue
-
-        const x0 = Math.floor(srcX), x1 = x0 + 1
-        const y0 = Math.floor(srcY), y1 = y0 + 1
-        const fx = srcX - x0, fy = srcY - y0
-        const di = (oy * totalW + gx) * 4
-
-        for (let c = 0; c < 3; c++) {
-          const v = frames[i].data[(y0 * fw + x0) * 4 + c] * (1 - fx) * (1 - fy)
-                  + frames[i].data[(y0 * fw + x1) * 4 + c] * fx       * (1 - fy)
-                  + frames[i].data[(y1 * fw + x0) * 4 + c] * (1 - fx) * fy
-                  + frames[i].data[(y1 * fw + x1) * 4 + c] * fx       * fy
-          out.data[di + c] = Math.round(clamp(v, 0, 255))
-        }
-        out.data[di + 3] = 255
-      }
-    }
-  }
-  return out
-}
-
 // ---------------------------------------------------------------------------
 // Crop helpers
 // ---------------------------------------------------------------------------
 
-function cropToContent(img: ImageData): ImageData {
-  const { width, height, data } = img
-  let minX = width, maxX = 0, minY = height, maxY = 0
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] > 0) {
-        if (x < minX) minX = x; if (x > maxX) maxX = x
-        if (y < minY) minY = y; if (y > maxY) maxY = y
-      }
-    }
-  }
-  if (minX > maxX || minY > maxY) return img
-  const nw = maxX - minX + 1, nh = maxY - minY + 1
-  const out = new ImageData(nw, nh)
-  for (let y = 0; y < nh; y++) {
-    for (let x = 0; x < nw; x++) {
-      const si = ((minY + y) * width + (minX + x)) * 4
-      const di = (y * nw + x) * 4
-      out.data[di]     = data[si]
-      out.data[di + 1] = data[si + 1]
-      out.data[di + 2] = data[si + 2]
-      out.data[di + 3] = data[si + 3]
-    }
-  }
-  return out
-}
-
 function cropBackground(img: ImageData, bg: BgColor): ImageData {
   const { width, height, data } = img
   const [bgR, bgG, bgB] = bg
-  const BG_ROW_FRAC = 0.75
+  const BG_FRAC = 0.85
 
-  function isBackgroundRow(y: number): boolean {
-    let bgCount = 0
+  function isBgRow(y: number) {
+    let bgCnt = 0
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4
       const dr = data[i] - bgR, dg = data[i + 1] - bgG, db = data[i + 2] - bgB
-      if (dr * dr + dg * dg + db * db < BG_THRESH_SQ) bgCount++
+      if (dr * dr + dg * dg + db * db < BG_THRESH_SQ) bgCnt++
     }
-    return bgCount / width >= BG_ROW_FRAC
+    return bgCnt / width >= BG_FRAC
   }
 
   let y0 = 0
-  while (y0 < height && isBackgroundRow(y0)) y0++
+  while (y0 < height && isBgRow(y0)) y0++
   let y1 = height - 1
-  while (y1 > y0 && isBackgroundRow(y1)) y1--
-
-  if (y0 === 0 && y1 === height - 1) return img
-  if (y1 - y0 < height * 0.1) return img
+  while (y1 > y0 && isBgRow(y1)) y1--
+  if (y1 - y0 < height * 0.05) return img
 
   const margin = Math.round(height * 0.01)
   y0 = Math.max(0, y0 - margin)
   y1 = Math.min(height - 1, y1 + margin)
   const nh = y1 - y0 + 1
-
   const out = new ImageData(width, nh)
   for (let y = 0; y < nh; y++) {
-    out.data.set(
-      data.subarray((y0 + y) * width * 4, (y0 + y + 1) * width * 4),
-      y * width * 4,
-    )
+    out.data.set(data.subarray((y0 + y) * width * 4, (y0 + y + 1) * width * 4), y * width * 4)
+  }
+  return out
+}
+
+function cropSides(img: ImageData): ImageData {
+  const { width, height, data } = img
+  let x0 = 0, x1 = width - 1
+  outer: for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      if (data[(y * width + x) * 4 + 3] > 0) { x0 = x; break outer }
+    }
+  }
+  outer: for (let x = width - 1; x >= x0; x--) {
+    for (let y = 0; y < height; y++) {
+      if (data[(y * width + x) * 4 + 3] > 0) { x1 = x; break outer }
+    }
+  }
+  if (x0 === 0 && x1 === width - 1) return img
+  const nw = x1 - x0 + 1
+  const out = new ImageData(nw, height)
+  for (let y = 0; y < height; y++) {
+    const si = (y * width + x0) * 4
+    out.data.set(data.subarray(si, si + nw * 4), y * nw * 4)
   }
   return out
 }
@@ -345,81 +299,118 @@ self.addEventListener('message', (event: MessageEvent<WorkerInput>) => {
 
   try {
     const { frames } = msg
-    if (!frames || frames.length === 0) {
-      self.postMessage({ type: 'error', message: 'No frames provided' } as WorkerOutput)
+    if (!frames || frames.length < 2) {
+      self.postMessage({ type: 'error', message: 'Need at least 2 frames' } as WorkerOutput)
       return
     }
 
-    const n = frames.length
+    const n  = frames.length
     const fw = frames[0].width
     const fh = frames[0].height
     const post = (o: WorkerOutput) => self.postMessage(o)
 
-    post({ type: 'progress', step: 'Detecting background…', percent: 10 })
+    // -----------------------------------------------------------------------
+    // Phase 1: Detect background, build profiles, find can geometry
+    // -----------------------------------------------------------------------
+    post({ type: 'progress', step: 'Detecting background…', percent: 5 })
     const bg = sampleBackground(frames[0])
 
-    // -----------------------------------------------------------------------
-    // Phase 1: Build column profiles for all frames
-    // -----------------------------------------------------------------------
-    post({ type: 'progress', step: 'Analysing frames…', percent: 20 })
-    const profiles: Float32Array[] = frames.map(f => columnProfile(f, bg))
+    post({ type: 'progress', step: 'Analysing frames…', percent: 10 })
+    const gradProfiles = frames.map(f => gradientProfile(f, bg))
+    const geoms        = frames.map((f, i) => detectCanGeometry(f, bg, gradProfiles[i]))
+
+    // Robust can vertical centre: median across all frames
+    const sortedCy = geoms.map(g => g.cy).slice().sort((a, b) => a - b)
+    const refCy    = sortedCy[Math.floor(n / 2)]
 
     // -----------------------------------------------------------------------
-    // Phase 2: Find pairwise offsets via 1-D cross-correlation
+    // Phase 2: Detect per-pair rotation
     // -----------------------------------------------------------------------
-    const xPositions: number[] = [0]
-    const nccScores: number[] = [0]
+    post({ type: 'progress', step: 'Measuring rotation…', percent: 25 })
+
+    interface Strip { frameIdx: number; width: number; rotation: number; score: number }
+    const strips: Strip[] = []
 
     for (let i = 1; i < n; i++) {
-      const pct = Math.round(20 + ((i - 1) / (n - 1)) * 50)
+      const pct = Math.round(25 + ((i - 1) / (n - 1)) * 35)
       post({ type: 'progress', step: `Aligning frame ${i + 1} of ${n}…`, percent: pct })
-      const { offset, nccScore } = findOffset(profiles[i - 1], profiles[i], fw)
-      xPositions.push(xPositions[i - 1] + offset)
-      nccScores.push(nccScore)
+
+      const { shift, score } = detectRotation(
+        gradProfiles[i - 1], geoms[i - 1].cx,
+        gradProfiles[i],     geoms[i].cx,
+        fw,
+      )
+
+      // shift > 0 → can rotated so features moved right → label advancing
+      // We use |shift| as strip width; direction handled by time order.
+      const w = clamp(Math.abs(shift), 0, MAX_STRIP)
+      if (w >= MIN_ROTATION) {
+        strips.push({ frameIdx: i, width: w, rotation: shift, score })
+      }
+    }
+
+    if (strips.length === 0) {
+      self.postMessage({ type: 'error', message: 'No rotation detected between frames — did the can stay still?' } as WorkerOutput)
+      return
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Sort frames by panorama position, normalise to min = 0
+    // Phase 3: Assemble slit-scan panorama
     // -----------------------------------------------------------------------
-    const order = xPositions
-      .map((x, i) => ({ x, i }))
-      .sort((a, b) => a.x - b.x)
+    post({ type: 'progress', step: 'Assembling panorama…', percent: 65 })
 
-    const minX = order[0].x
-    const sortedFrames = order.map(o => frames[o.i])
-    const sortedX      = order.map(o => o.x - minX)
-    const sortedNcc    = order.map(o => nccScores[o.i])
+    const totalW = strips.reduce((s, t) => s + t.width, 0)
 
-    // -----------------------------------------------------------------------
-    // Phase 4: Composite
-    // -----------------------------------------------------------------------
-    post({ type: 'progress', step: 'Compositing panorama…', percent: 75 })
-    const stitched = composite(sortedFrames, sortedX)
+    // Output height: frame height (will crop later)
+    const out = new ImageData(totalW, fh)
+    let outCol = 0
 
-    post({ type: 'progress', step: 'Cropping…', percent: 90 })
-    const cropped = cropToContent(stitched)
-    const result  = cropBackground(cropped, bg)
+    for (const strip of strips) {
+      const frame  = frames[strip.frameIdx]
+      const geo    = geoms[strip.frameIdx]
+      const halfW  = Math.floor(strip.width / 2)
+      const startX = clamp(geo.cx - halfW, 0, fw - strip.width)
+      // Vertical shift to align can centre to refCy
+      const dyPx   = geo.cy - refCy
 
-    // -----------------------------------------------------------------------
-    // Debug info — map back to original frame indices
-    // -----------------------------------------------------------------------
-    const debugFrames: FrameDebugInfo[] = sortedX.map((xPos, si) => {
-      const origIdx = order[si].i
-      const overlapPx = si > 0 ? Math.max(0, fw - (sortedX[si] - sortedX[si - 1])) : 0
-      return {
-        frameIndex: origIdx,
-        xPosition: xPos,
-        overlapWithPrev: overlapPx,
-        overlapPct: Math.round((overlapPx / fw) * 100),
-        nccScore: sortedNcc[si],
+      for (let s = 0; s < strip.width; s++) {
+        const srcX = startX + s
+        for (let oy = 0; oy < fh; oy++) {
+          const srcY = clamp(oy + dyPx, 0, fh - 1)
+          const si = (srcY * fw + srcX) * 4
+          const di = (oy  * totalW + outCol) * 4
+          out.data[di]     = frame.data[si]
+          out.data[di + 1] = frame.data[si + 1]
+          out.data[di + 2] = frame.data[si + 2]
+          out.data[di + 3] = 255
+        }
+        outCol++
       }
-    })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Crop background rows, then sides
+    // -----------------------------------------------------------------------
+    post({ type: 'progress', step: 'Cropping…', percent: 88 })
+    const cropped = cropBackground(out, bg)
+    const result  = cropSides(cropped)
+
+    // -----------------------------------------------------------------------
+    // Debug info
+    // -----------------------------------------------------------------------
+    const debugFrames: FrameDebugInfo[] = strips.map((st, si) => ({
+      frameIndex:     st.frameIdx,
+      xPosition:      strips.slice(0, si).reduce((s, t) => s + t.width, 0),
+      overlapWithPrev: 0,
+      overlapPct:      0,
+      nccScore:        Math.round(st.score * 1000) / 1000,
+    }))
 
     const debugInfo: StitchDebugInfo = {
-      frameWidth: fw,
-      frameHeight: fh,
+      frameWidth:    fw,
+      frameHeight:   fh,
       panoramaWidth: result.width,
-      frames: debugFrames,
+      frames:        debugFrames,
     }
 
     post({ type: 'progress', step: 'Done', percent: 100 })
