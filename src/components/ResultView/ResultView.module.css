@@ -67,6 +67,48 @@
   white-space: nowrap;
 }
 
+/* ─── Flat-frames debug strip ────────────────────────────────────────────────── */
+
+.flatStrip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.88);
+  border-top: 1px solid rgba(220, 38, 38, 0.3);
+  flex-shrink: 0;
+  height: 76px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.flatThumb {
+  height: 60px;
+  width: auto;
+  flex-shrink: 0;
+  border-radius: 3px;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.flatThumb:hover {
+  opacity: 1;
+  border-color: rgba(255, 136, 136, 0.7);
+}
+
+.flatStripLabel {
+  font-size: 0.65rem;
+  color: #ff8888;
+  font-family: monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-right: 6px;
+  writing-mode: horizontal-tb;
+}
+
 /* ─── Pan/zoom viewport ──────────────────────────────────────────────────────── */
 
 .viewport {

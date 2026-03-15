@@ -4,10 +4,12 @@ import { ProgressCard } from '../ProgressCard'
 import { processFrames } from '../../lib/stitcher'
 import { unwrapLabel } from '../../lib/unwrapper'
 import type { Point2D } from '../../lib/unwrapper'
+import { autoUnwrapFrames } from '../../lib/autoUnwrapper'
 
 export type ProcessingTask =
   | { kind: 'stitch'; frames: Blob[] }
   | { kind: 'unwrap'; photo: Blob; points: [Point2D, Point2D, Point2D, Point2D, Point2D, Point2D] }
+  | { kind: 'autoUnwrap'; frames: Blob[]; debugMode: boolean }
 
 interface ProcessingViewProps {
   task: ProcessingTask
@@ -31,7 +33,9 @@ export function ProcessingView({ task, onComplete, onError }: ProcessingViewProp
     const run =
       task.kind === 'unwrap'
         ? unwrapLabel(task.photo, task.points, progress)
-        : processFrames(task.frames, progress)
+        : task.kind === 'autoUnwrap'
+          ? autoUnwrapFrames(task.frames, progress, task.debugMode)
+          : processFrames(task.frames, progress)
 
     run
       .then((blob) => onComplete(blob))
@@ -41,10 +45,11 @@ export function ProcessingView({ task, onComplete, onError }: ProcessingViewProp
       })
   }, [task, onComplete, onError])
 
+  const frameCount = task.kind !== 'unwrap' ? task.frames.length : 0
   const detail =
     task.kind === 'unwrap'
       ? 'Mapping label mesh to flat image'
-      : `${task.frames.length} frame${task.frames.length !== 1 ? 's' : ''} to process`
+      : `${frameCount} frame${frameCount !== 1 ? 's' : ''} to process`
 
   if (errorMsg !== null) {
     return (

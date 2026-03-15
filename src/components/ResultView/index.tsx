@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import styles from './ResultView.module.css'
 import { getLastDebugInfo } from '../../lib/stitcher'
 import type { StitchDebugInfo } from '../../workers/stitcher.worker'
+import { getLastAutoUnwrapDebugInfo, getLastFlatFrameBlobs } from '../../lib/autoUnwrapper'
+import type { AutoUnwrapDebugInfo } from '../../workers/autoUnwrap.worker'
 
 interface ResultViewProps {
   resultBlob: Blob
@@ -30,6 +32,8 @@ export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewP
   const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null)
   const [transform, setTransform] = useState<Transform>({ scale: 1, x: 0, y: 0 })
   const [debugInfo] = useState<StitchDebugInfo | null>(() => devMode ? getLastDebugInfo() : null)
+  const [autoDebugInfo] = useState<AutoUnwrapDebugInfo | null>(() => devMode ? getLastAutoUnwrapDebugInfo() : null)
+  const [flatFrameUrls, setFlatFrameUrls] = useState<string[]>([])
   const [showDebug, setShowDebug] = useState(false)
   const debugCanvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -49,6 +53,16 @@ export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewP
       URL.revokeObjectURL(url)
     }
   }, [resultBlob])
+
+  // Create object URLs for flat-frame thumbnails (dev mode)
+  useEffect(() => {
+    if (!devMode) return
+    const blobs = getLastFlatFrameBlobs()
+    if (blobs.length === 0) return
+    const urls = blobs.map(b => URL.createObjectURL(b))
+    setFlatFrameUrls(urls)
+    return () => { urls.forEach(u => URL.revokeObjectURL(u)) }
+  }, [devMode])
 
   // Show a toast for 2 seconds
   const showToast = useCallback((message: string) => {
@@ -245,7 +259,7 @@ export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewP
       {dimensions && (
         <div className={styles.infoBar} aria-label="Image dimensions">
           <span>{dimensions.w} &times; {dimensions.h} px</span>
-          {devMode && debugInfo && (
+          {devMode && (debugInfo || autoDebugInfo) && (
             <button className={styles.debugToggle} onClick={() => setShowDebug(v => !v)}>
               {showDebug ? 'Hide debug' : 'Debug'}
             </button>
@@ -306,7 +320,52 @@ export function ResultView({ resultBlob, onReset, devMode = false }: ResultViewP
         </button>
       </div>
 
-      {/* Debug panel */}
+      {/* Flat-frames strip (auto-unwrap dev mode) */}
+      {devMode && showDebug && flatFrameUrls.length > 0 && (
+        <div className={styles.flatStrip}>
+          <span className={styles.flatStripLabel}>
+            Flat&nbsp;frames&nbsp;({flatFrameUrls.length})
+          </span>
+          {flatFrameUrls.map((url, i) => (
+            <img
+              key={i}
+              src={url}
+              alt={`flat frame ${i}`}
+              className={styles.flatThumb}
+              onClick={() => window.open(url, '_blank')}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Auto-unwrap debug panel */}
+      {devMode && showDebug && autoDebugInfo && (
+        <div className={styles.debugPanel}>
+          <p className={styles.debugTitle}>
+            Auto-unwrap — {autoDebugInfo.detectedFrames}/{autoDebugInfo.totalFrames} frames detected
+            &nbsp;| panorama {autoDebugInfo.panoramaWidth}×{autoDebugInfo.panoramaHeight}px
+          </p>
+          <table className={styles.debugTable}>
+            <thead>
+              <tr><th>Frame</th><th>Detected</th><th>Confidence</th><th>X offset</th></tr>
+            </thead>
+            <tbody>
+              {autoDebugInfo.frames.filter(f => f.detected).map(f => (
+                <tr key={f.frameIndex}>
+                  <td>{f.frameIndex}</td>
+                  <td style={{ color: '#00ff88' }}>✓</td>
+                  <td style={{ color: f.confidence > 0.6 ? '#00ff88' : f.confidence > 0.4 ? '#ffcc00' : '#ff4444' }}>
+                    {(f.confidence * 100).toFixed(0)}%
+                  </td>
+                  <td>{f.xOffset}px</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Slit-scan debug panel */}
       {devMode && showDebug && debugInfo && (
         <div className={styles.debugPanel}>
           <p className={styles.debugTitle}>Stitch debug — panorama {debugInfo.panoramaWidth}×{debugInfo.frameHeight}px | frames {debugInfo.frameWidth}px wide</p>

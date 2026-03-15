@@ -68,10 +68,10 @@ function App() {
     setAppState('processing')
   }
 
-  // Legacy multi-photo path
+  // Video / multi-photo path → auto-detect edges, unwrap per frame, stitch
   const handleConfirm = (frames: Blob[]) => {
     setCapturedFrames(frames)
-    setProcessingTask({ kind: 'stitch', frames })
+    setProcessingTask({ kind: 'autoUnwrap', frames, debugMode: devMode })
     setAppState('processing')
   }
 
