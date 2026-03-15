@@ -5,27 +5,32 @@ import { CameraCapture } from './components/CameraCapture'
 import { FrameReview } from './components/FrameReview'
 import { InstallPrompt } from './components/InstallPrompt'
 import { LandingPage } from './components/LandingPage'
+import { PointPicker } from './components/PointPicker'
 import { ProcessingView } from './components/ProcessingView'
+import type { ProcessingTask } from './components/ProcessingView'
 import { ProgressCard } from './components/ProgressCard'
 import { ResultView } from './components/ResultView'
 import { extractFrames } from './lib/frameSelector'
+import type { Point2D } from './lib/unwrapper'
 
-export type AppState = 'landing' | 'capture' | 'review' | 'processing' | 'result'
+export type AppState = 'landing' | 'capture' | 'review' | 'points' | 'processing' | 'result'
 
-const STATE_ORDER: AppState[] = ['capture', 'review', 'processing', 'result']
+const STATE_ORDER: AppState[] = ['capture', 'points', 'processing', 'result']
 
 const VIDEO_FRAME_TARGET = 60
 
 function App() {
   const devMode = useDevMode()
-  const [appState, setAppState] = useState<AppState>('landing')
+  const [appState, setAppState]       = useState<AppState>('landing')
   const [capturedFrames, setCapturedFrames] = useState<Blob[]>([])
-  const [resultBlob, setResultBlob] = useState<Blob | null>(null)
-  const [isExtracting, setIsExtracting] = useState(false)
+  const [capturedPhoto, setCapturedPhoto]   = useState<Blob | null>(null)
+  const [processingTask, setProcessingTask] = useState<ProcessingTask | null>(null)
+  const [resultBlob, setResultBlob]         = useState<Blob | null>(null)
+  const [isExtracting, setIsExtracting]     = useState(false)
   const [extractionProgress, setExtractionProgress] = useState({ current: 0, total: VIDEO_FRAME_TARGET })
 
   const handleCapture = async (blobs: Blob[]) => {
-    // Single video blob → extract frames on the main thread
+    // Single video blob → extract frames (legacy slit-scan path)
     if (blobs.length === 1 && blobs[0].type.startsWith('video/')) {
       setIsExtracting(true)
       setExtractionProgress({ current: 0, total: VIDEO_FRAME_TARGET })
@@ -41,20 +46,39 @@ function App() {
       } finally {
         setIsExtracting(false)
       }
-    } else {
-      // Photo blobs — go straight to review
-      setCapturedFrames(blobs)
-      setAppState('review')
+      return
     }
+
+    // Single image blob → six-point unwrap path
+    if (blobs.length === 1) {
+      setCapturedPhoto(blobs[0])
+      setAppState('points')
+      return
+    }
+
+    // Multiple images → legacy multi-photo review
+    setCapturedFrames(blobs)
+    setAppState('review')
   }
 
+  // Six-point path: user confirmed 6 points
+  const handleConfirmPoints = (points: [Point2D, Point2D, Point2D, Point2D, Point2D, Point2D]) => {
+    if (!capturedPhoto) return
+    setProcessingTask({ kind: 'unwrap', photo: capturedPhoto, points })
+    setAppState('processing')
+  }
+
+  // Legacy multi-photo path
   const handleConfirm = (frames: Blob[]) => {
     setCapturedFrames(frames)
+    setProcessingTask({ kind: 'stitch', frames })
     setAppState('processing')
   }
 
   const handleRetake = () => {
     setCapturedFrames([])
+    setCapturedPhoto(null)
+    setProcessingTask(null)
     setAppState('capture')
   }
 
@@ -64,8 +88,9 @@ function App() {
   }
 
   const handleProcessingError = (_error: string) => {
-    // Return to capture so the user can try again
     setCapturedFrames([])
+    setCapturedPhoto(null)
+    setProcessingTask(null)
     setAppState('capture')
   }
 
@@ -73,8 +98,20 @@ function App() {
     switch (appState) {
       case 'landing':
         return <LandingPage onStart={() => setAppState('capture')} />
+
       case 'capture':
         return <CameraCapture onCapture={handleCapture} devMode={devMode} />
+
+      case 'points':
+        if (!capturedPhoto) return null
+        return (
+          <PointPicker
+            photo={capturedPhoto}
+            onConfirm={handleConfirmPoints}
+            onRetake={handleRetake}
+          />
+        )
+
       case 'review':
         return (
           <FrameReview
@@ -83,14 +120,17 @@ function App() {
             onRetake={handleRetake}
           />
         )
+
       case 'processing':
+        if (!processingTask) return null
         return (
           <ProcessingView
-            frames={capturedFrames}
+            task={processingTask}
             onComplete={handleProcessingComplete}
             onError={handleProcessingError}
           />
         )
+
       case 'result':
         if (!resultBlob) return null
         return (
@@ -99,6 +139,8 @@ function App() {
             devMode={devMode}
             onReset={() => {
               setCapturedFrames([])
+              setCapturedPhoto(null)
+              setProcessingTask(null)
               setResultBlob(null)
               setAppState('landing')
             }}

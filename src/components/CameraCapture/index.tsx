@@ -64,7 +64,7 @@ export function CameraCapture({ onCapture, devMode = false }: CameraCaptureProps
   }, [])
 
   const handleDone = useCallback(() => {
-    if (photos.length >= 2) {
+    if (photos.length >= 1) {
       stopCamera()
       onCapture(photos)
     }
@@ -282,11 +282,11 @@ export function CameraCapture({ onCapture, devMode = false }: CameraCaptureProps
             )}
 
             {/* Right side action */}
-            {mode === 'photo' && photos.length >= 2 ? (
+            {mode === 'photo' && photos.length >= 1 ? (
               <button
                 className={`${styles.sideBtn} ${styles.sideBtnAccent}`}
                 onClick={handleDone}
-                aria-label={`Done — use ${photos.length} photos`}
+                aria-label={`Done — use ${photos.length} photo${photos.length !== 1 ? 's' : ''}`}
               >
                 Done
               </button>

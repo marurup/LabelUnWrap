@@ -1,0 +1,117 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Instruction bar ─────────────────────────────────────────────────────── */
+.instructionBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px var(--spacing-md);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  min-height: 50px;
+  flex-shrink: 0;
+}
+
+.stepBadge {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.instruction {
+  font-size: 0.88rem;
+  color: var(--color-text);
+  line-height: 1.3;
+}
+
+.allSet {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+/* ── Photo / canvas area ─────────────────────────────────────────────────── */
+.photoArea {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #000;
+  touch-action: none;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Bottom controls ─────────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  padding-bottom: calc(var(--spacing-sm) + var(--safe-bottom));
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.btnSecondary {
+  flex: 1;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btnSecondary:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.btnSecondary:not(:disabled):active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.btnPrimary {
+  flex: 1.5;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btnPrimary:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.btnPrimary:not(:disabled):active {
+  opacity: 0.85;
+}
