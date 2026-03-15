@@ -160,7 +160,7 @@ self.onmessage = function (event: MessageEvent<UnwrapInput>) {
     const result = new ImageData(outData, outW, outH)
     postMessage(
       { type: 'result', imageData: result } satisfies WorkerMessage,
-      [result.data.buffer as ArrayBuffer],
+      { transfer: [result.data.buffer as ArrayBuffer] },
     )
   } catch (err) {
     postMessage({
