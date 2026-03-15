@@ -37,7 +37,7 @@ const ROWS = 30
  * Fit a parabola through (left, apex, right) where apex is the curve peak.
  * Returns f(x) = p*(x − apex.x)² + apex.y
  */
-function makeArcFn(left: Point2D, apex: Point2D, right: Point2D): (x: number) => number {
+function makeArcFn(left: Point2D, apex: Point2D, _right: Point2D): (x: number) => number {
   const dx = left.x - apex.x
   const p = dx * dx > 0.01 ? (left.y - apex.y) / (dx * dx) : 0
   return (x: number) => p * (x - apex.x) * (x - apex.x) + apex.y
@@ -160,7 +160,7 @@ self.onmessage = function (event: MessageEvent<UnwrapInput>) {
     const result = new ImageData(outData, outW, outH)
     postMessage(
       { type: 'result', imageData: result } satisfies WorkerMessage,
-      [result.data.buffer],
+      [result.data.buffer as ArrayBuffer],
     )
   } catch (err) {
     postMessage({
